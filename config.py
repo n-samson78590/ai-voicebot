@@ -16,7 +16,7 @@ class Config:
     
     # ===== CORE API SETTINGS =====
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
-    OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-realtime-preview-2024-12-17')
+    OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-realtime')
     OPENAI_VOICE = os.getenv('OPENAI_VOICE', 'coral')
     OPENAI_TEMPERATURE = float(os.getenv('OPENAI_TEMPERATURE', '0.7'))
     
@@ -161,14 +161,31 @@ class Config:
     
     @classmethod
     def get_enhanced_session_config(cls, sample_rate: int, voice: str) -> Dict[str, Any]:
-        """Get enhanced session configuration"""
+        """Get OpenAI Realtime GA session configuration."""
         return {
+            'type': 'realtime',
             'model': cls.OPENAI_MODEL,
-            'voice': voice,
-            'input_audio_format': 'g711_ulaw',
-            'output_audio_format': 'g711_ulaw',
-            'input_audio_transcription': {'model': 'whisper-1'},
-            'turn_detection': {'type': 'server_vad', 'threshold': 0.5},
-            'temperature': cls.TEMPERATURE,
-            'max_response_output_tokens': 4096
+            'instructions': (
+                f"You are {cls.SALES_REP_NAME}, a warm, concise sales assistant for "
+                f"{cls.COMPANY_NAME}. Help callers understand products, answer pricing "
+                "questions, schedule demos, and transfer to a human when needed."
+            ),
+            'output_modalities': ['audio'],
+            'audio': {
+                'input': {
+                    'format': {'type': 'audio/pcmu'},
+                    'transcription': {'model': 'whisper-1'},
+                    'turn_detection': {
+                        'type': 'server_vad',
+                        'threshold': 0.5,
+                        'create_response': False,
+                        'interrupt_response': True
+                    }
+                },
+                'output': {
+                    'format': {'type': 'audio/pcmu'},
+                    'voice': voice
+                }
+            },
+            'max_output_tokens': 4096
         } 
