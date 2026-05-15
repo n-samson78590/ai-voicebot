@@ -15,8 +15,8 @@ class Config:
     """Main configuration class for the Voice AI Bot System"""
     
     # ===== CORE API SETTINGS =====
-    OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
-    OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-realtime-preview-2024-12-17')
+    OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+    OPENAI_MODEL = os.getenv('OPENAI_MODEL')
     OPENAI_VOICE = os.getenv('OPENAI_VOICE', 'coral')
     OPENAI_TEMPERATURE = float(os.getenv('OPENAI_TEMPERATURE', '0.7'))
     
@@ -30,8 +30,8 @@ class Config:
     LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     
     # ===== AUDIO PROCESSING =====
-    SAMPLE_RATE = int(os.getenv('SAMPLE_RATE', '24000'))
-    DEFAULT_SAMPLE_RATE = int(os.getenv('DEFAULT_SAMPLE_RATE', '24000'))
+    SAMPLE_RATE = int(os.getenv('SAMPLE_RATE', '8000'))
+    DEFAULT_SAMPLE_RATE = int(os.getenv('DEFAULT_SAMPLE_RATE', '8000'))
     SUPPORTED_SAMPLE_RATES = [8000, 16000, 24000]
     AUDIO_CHUNK_SIZE = int(os.getenv('AUDIO_CHUNK_SIZE', '10'))
     MIN_CHUNK_SIZE_MS = int(os.getenv('MIN_CHUNK_SIZE_MS', '20'))
@@ -49,7 +49,7 @@ class Config:
     # ===== BOT PERSONALITY =====
     SALES_BOT_NAME = os.getenv('SALES_BOT_NAME', 'Sarah')
     SALES_REP_NAME = os.getenv('SALES_REP_NAME', 'Sarah')  # Alias for compatibility
-    COMPANY_NAME = os.getenv('COMPANY_NAME', 'TechSolutions Inc.')
+    COMPANY_NAME = os.getenv('COMPANY_NAME')
     TEMPERATURE = float(os.getenv('TEMPERATURE', '0.7'))
     
     # ===== AI ENGINE PREFERENCES =====
@@ -162,11 +162,20 @@ class Config:
     @classmethod
     def get_enhanced_session_config(cls, sample_rate: int, voice: str) -> Dict[str, Any]:
         """Get enhanced session configuration"""
+        # Prefer telephony-safe u-law at 8kHz, and PCM16 for higher rates.
+        # This keeps codec/rate alignment predictable across Exotel and OpenAI.
+        if sample_rate <= 8000:
+            input_audio_format = 'g711_ulaw'
+            output_audio_format = 'g711_ulaw'
+        else:
+            input_audio_format = 'pcm16'
+            output_audio_format = 'pcm16'
+
         return {
             'model': cls.OPENAI_MODEL,
             'voice': voice,
-            'input_audio_format': 'g711_ulaw',
-            'output_audio_format': 'g711_ulaw',
+            'input_audio_format': input_audio_format,
+            'output_audio_format': output_audio_format,
             'input_audio_transcription': {'model': 'whisper-1'},
             'turn_detection': {'type': 'server_vad', 'threshold': 0.5},
             'temperature': cls.TEMPERATURE,

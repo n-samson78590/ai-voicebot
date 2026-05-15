@@ -79,8 +79,9 @@ class OpenAIRealtimeSalesBot:
                 websocket_path = path or getattr(websocket, 'path', '/')
             except:
                 websocket_path = '/'
-            detected_sample_rate = self.default_sample_rate  # Use default sample rate
+            detected_sample_rate = self._extract_sample_rate_from_websocket_path(websocket_path)
             logger.info(f"📞 NEW ENHANCED SALES CALL from Exotel: {websocket.remote_address}")
+            logger.info(f"🔗 WebSocket path: {websocket_path}")
             logger.info(f"🎵 Detected sample rate: {detected_sample_rate}Hz")
             
             # Set up connection keep-alive and error handling
@@ -97,6 +98,14 @@ class OpenAIRealtimeSalesBot:
                         stream_id = data["stream_sid"]
                     
                     # Initialize connection settings on first event
+                    event_sample_rate = self._extract_sample_rate_from_event(data)
+                    if event_sample_rate is not None and event_sample_rate != detected_sample_rate:
+                        logger.info(
+                            f"🎚️ Overriding sample rate from event metadata: "
+                            f"{detected_sample_rate}Hz -> {event_sample_rate}Hz"
+                        )
+                        detected_sample_rate = event_sample_rate
+
                     if stream_id not in self.connection_sample_rates:
                         self._initialize_connection_settings(stream_id, detected_sample_rate, data)
                     
@@ -144,6 +153,65 @@ class OpenAIRealtimeSalesBot:
         finally:
             logger.info(f"🧹 CLEANING UP ENHANCED CONNECTION: {stream_id}")
             await self.cleanup_connections(stream_id)
+
+    def _extract_sample_rate_from_websocket_path(self, websocket_path: str) -> int:
+        """Extract sample rate from websocket query params with safe fallback."""
+        try:
+            parsed = urlparse(websocket_path or "/")
+            query_params = parse_qs(parsed.query)
+
+            for key in ("sample-rate", "sample_rate", "samplerate"):
+                value = query_params.get(key)
+                if not value:
+                    continue
+
+                parsed_rate = int(value[0])
+                if parsed_rate in Config.SUPPORTED_SAMPLE_RATES:
+                    return parsed_rate
+
+                logger.warning(
+                    f"⚠️ Unsupported sample rate '{parsed_rate}' in query param '{key}'. "
+                    f"Falling back to default {self.default_sample_rate}Hz"
+                )
+                return self.default_sample_rate
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to parse sample rate from websocket path: {e}")
+
+        return self.default_sample_rate
+
+    def _extract_sample_rate_from_event(self, data: dict) -> Optional[int]:
+        """Extract sample rate from Exotel event payload when provided."""
+        if not isinstance(data, dict):
+            return None
+
+        candidate_values = []
+
+        media_format = data.get("mediaFormat") or {}
+        if isinstance(media_format, dict):
+            candidate_values.extend([
+                media_format.get("sampleRate"),
+                media_format.get("sample_rate"),
+                media_format.get("samplingRate"),
+                media_format.get("sampling_rate"),
+            ])
+
+        candidate_values.extend([
+            data.get("sampleRate"),
+            data.get("sample_rate"),
+        ])
+
+        for value in candidate_values:
+            if value is None:
+                continue
+            try:
+                parsed_rate = int(value)
+            except (TypeError, ValueError):
+                continue
+
+            if parsed_rate in Config.SUPPORTED_SAMPLE_RATES:
+                return parsed_rate
+
+        return None
 
     def _initialize_connection_settings(self, stream_id: str, sample_rate: int, start_data: dict):
         """Initialize enhanced connection settings based on detected parameters"""
@@ -442,7 +510,7 @@ class OpenAIRealtimeSalesBot:
             # Connect to OpenAI Realtime API with enhanced SSL context
             openai_ws = await websockets.connect(
                 url, 
-                additional_headers=headers,
+                extra_headers=headers,
                 ssl=ssl_context,
                 ping_interval=20,  # Enhanced connection stability
                 ping_timeout=10
@@ -644,13 +712,15 @@ class OpenAIRealtimeSalesBot:
             if output_format == "pcm16" and sample_rate >= 16000:
                 # High quality PCM output - convert to PCM for Exotel
                 exotel_pcm = openai_audio
+                source_sample_rate = sample_rate
             else:
                 # G.711 u-law output - convert to PCM for Exotel
                 exotel_pcm = self.convert_ulaw_to_pcm(openai_audio)
+                source_sample_rate = 8000
             
             # Apply resampling if needed for different sample rates
-            if sample_rate != self.default_sample_rate:
-                exotel_pcm = self._resample_audio(exotel_pcm, self.default_sample_rate, sample_rate)
+            if sample_rate != source_sample_rate:
+                exotel_pcm = self._resample_audio(exotel_pcm, source_sample_rate, sample_rate)
             
             exotel_audio_b64 = base64.b64encode(exotel_pcm).decode()
             

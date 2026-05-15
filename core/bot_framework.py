@@ -79,7 +79,7 @@ class BotConfiguration:
     personality: BotPersonality = BotPersonality.PROFESSIONAL
     
     # AI Configuration
-    model: str = "gpt-4o-realtime-preview-2024-12-17"
+    model: str = "gpt-realtime-mini"
     voice: str = "coral"
     temperature: float = 0.7
     max_tokens: int = 2000

@@ -89,18 +89,17 @@ The bot will start a WebSocket server on `0.0.0.0:5000`.
 - **Public:** Use ngrok or your server's public IP
 
 ### Exotel Voicebot Applet Configuration
+Use the Exotel voicebot applet to connect to WebSocket URL. Configure applet from Exotel dashboard.
 
 1. **URL:** `wss://your-domain.com/?sample-rate=24000`
-2. **Sample Rate:** 24kHz (recommended for high quality)
+2. **Sample Rate:** 24kHz (recommended for high quality) [Stick to 8000Hz if using Exotel's default settings]
 3. **Audio Format:** Raw/slin (16-bit PCM)
 4. **Bidirectional Streaming:** Enabled
 
 ### Test Message Format
 
 ```json
-{
-  "event": "connected"
-}
+{"event": "connected"}
 ```
 
 ## 🏗️ Project Structure
@@ -192,9 +191,12 @@ python main.py --test
 ```bash
 # Using wscat
 wscat -c ws://localhost:5000
+wscat -c wss://your-domain.com/?sample-rate=your-sample-rate
 
 # Send test message
+```json
 {"event": "connected"}
+```
 ```
 
 ## 🔒 Security
