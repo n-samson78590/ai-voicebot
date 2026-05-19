@@ -163,6 +163,7 @@ class OpenAIRealtimeSalesBot:
         logger.info(f"   📦 Chunk Size: {chunk_size_ms}ms ({chunk_size_bytes} bytes)")
         logger.info(f"   ⚙️ Enhanced Events: {self.exotel_enhanced_events}")
 
+    # CHECK
     async def handle_exotel_connected(self, stream_id: str, data: dict):
         """Handle Exotel connected event with enhanced confirmation"""
         logger.info(f"✅ EXOTEL CONNECTED (ENHANCED): {stream_id}")
@@ -304,7 +305,7 @@ class OpenAIRealtimeSalesBot:
             input_format = openai_config.get("input_format", "raw/slin")
             
             # Convert audio based on sample rate and format
-            if input_format in ("pcm16", "audio/pcm") and sample_rate >= 16000:
+            if input_format == "pcm16" and sample_rate >= 16000:
                 # High quality PCM for 16kHz+ 
                 openai_audio = chunk  # Already PCM16
             else:
@@ -433,15 +434,16 @@ class OpenAIRealtimeSalesBot:
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
             
-            # Realtime GA no longer uses the OpenAI-Beta header.
+            # Enhanced headers for latest API version
             headers = [
-                ("Authorization", f"Bearer {self.openai_api_key}")
+                ("Authorization", f"Bearer {self.openai_api_key}"),
+                ("OpenAI-Beta", "realtime=v1")
             ]
             
             # Connect to OpenAI Realtime API with enhanced SSL context
             openai_ws = await websockets.connect(
                 url, 
-                extra_headers=headers,
+                additional_headers=headers,
                 ssl=ssl_context,
                 ping_interval=20,  # Enhanced connection stability
                 ping_timeout=10
@@ -449,16 +451,13 @@ class OpenAIRealtimeSalesBot:
             
             # Get enhanced session configuration
             session_config = Config.get_enhanced_session_config(sample_rate, self.openai_voice)
-            session_config["input_audio_format"] = self._get_realtime_audio_format(session_config, "input")
-            session_config["output_audio_format"] = self._get_realtime_audio_format(session_config, "output")
-            session_config["voice"] = session_config.get("audio", {}).get("output", {}).get("voice", self.openai_voice)
             
             self.openai_connections[stream_id] = {
                 "websocket": openai_ws,
                 "start_time": time.time(),
                 "sample_rate": sample_rate,
-                "input_format": self._get_realtime_audio_format(session_config, "input"),
-                "output_format": self._get_realtime_audio_format(session_config, "output"),
+                "input_format": session_config["input_audio_format"],
+                "output_format": session_config["output_audio_format"],
                 "session_config": session_config
             }
             
@@ -496,7 +495,7 @@ class OpenAIRealtimeSalesBot:
             # Send enhanced session configuration
             session_update = {
                 "type": "session.update",
-                "session": self._realtime_session_payload(session_config)
+                "session": session_config
             }
             
             await openai_ws.send(json.dumps(session_update))
@@ -511,23 +510,6 @@ class OpenAIRealtimeSalesBot:
             
         except Exception as e:
             logger.error(f"❌ Error configuring enhanced OpenAI session: {e}")
-
-    def _get_realtime_audio_format(self, session_config: dict, direction: str) -> str:
-        """Return the GA Realtime audio format type for input or output."""
-        audio_config = session_config.get("audio", {}).get(direction, {})
-        format_config = audio_config.get("format", {})
-        if isinstance(format_config, dict):
-            return format_config.get("type", "audio/pcmu")
-        return format_config or "audio/pcmu"
-
-    def _realtime_session_payload(self, session_config: dict) -> dict:
-        """Remove local logging aliases before sending GA session config."""
-        payload = dict(session_config)
-        payload.pop("model", None)
-        payload.pop("input_audio_format", None)
-        payload.pop("output_audio_format", None)
-        payload.pop("voice", None)
-        return payload
 
     async def send_initial_greeting_enhanced(self, stream_id: str):
         """Send enhanced initial sales greeting through OpenAI"""
@@ -554,7 +536,7 @@ class OpenAIRealtimeSalesBot:
             response_msg = {
                 "type": "response.create",
                 "response": {
-                    "output_modalities": ["audio"],
+                    "modalities": ["audio", "text"],
                     "instructions": "Give a warm, professional greeting. Keep it concise and natural."
                 }
             }
@@ -575,11 +557,11 @@ class OpenAIRealtimeSalesBot:
                     
                     logger.debug(f"🤖 ENHANCED OPENAI EVENT: {event_type} for {stream_id}")
                     
-                    if event_type in ("response.output_audio.delta", "response.audio.delta"):
+                    if event_type == "response.audio.delta":
                         await self.handle_openai_audio_delta_enhanced(stream_id, data)
                     elif event_type == "response.function_call_arguments.done":
                         await self.handle_openai_function_call_enhanced(stream_id, data)
-                    elif event_type in ("response.output_audio_transcript.delta", "response.audio_transcript.delta"):
+                    elif event_type == "response.audio_transcript.delta":
                         transcript_delta = data.get('delta', '')
                         if transcript_delta.strip():
                             logger.info(f"🗣️ SARAH SPEAKING: {transcript_delta}")
@@ -628,14 +610,10 @@ class OpenAIRealtimeSalesBot:
             response_create = {
                 "type": "response.create",
                 "response": {
-                    "output_modalities": ["audio"],
+                    "modalities": ["audio", "text"],
                     "instructions": "Respond naturally and conversationally. Use appropriate pauses and inflections.",
-                    "audio": {
-                        "output": {
-                            "format": {"type": "audio/pcmu"},
-                            "voice": self.openai_voice
-                        }
-                    }
+                    "voice": self.openai_voice,
+                    "temperature": Config.TEMPERATURE
                 }
             }
             await openai_ws.send(json.dumps(response_create))
@@ -664,7 +642,7 @@ class OpenAIRealtimeSalesBot:
             openai_audio = base64.b64decode(audio_delta)
             
             # Convert audio for Exotel based on sample rate and format
-            if output_format in ("pcm16", "audio/pcm") and sample_rate >= 16000:
+            if output_format == "pcm16" and sample_rate >= 16000:
                 # High quality PCM output - convert to PCM for Exotel
                 exotel_pcm = openai_audio
             else:
@@ -733,7 +711,7 @@ class OpenAIRealtimeSalesBot:
             response_msg = {
                 "type": "response.create",
                 "response": {
-                    "output_modalities": ["audio"],
+                    "modalities": ["audio", "text"],
                     "instructions": f"Based on the function result, provide a natural response to the customer about {function_name}."
                 }
             }

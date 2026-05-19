@@ -135,3 +135,6 @@ ngrok
 ngrok-*
 .DS_Store
 *.pid
+
+# Bot launcher templates (generate using bot_launcher.py)
+bot_templates/
