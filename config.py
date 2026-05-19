@@ -16,9 +16,8 @@ class Config:
     
     # ===== CORE API SETTINGS =====
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
-    OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-realtime-preview-2024-12-17')
+    OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-realtime')
     OPENAI_VOICE = os.getenv('OPENAI_VOICE', 'coral')
-    OPENAI_TEMPERATURE = float(os.getenv('OPENAI_TEMPERATURE', '0.7'))
     
     # ===== SERVER SETTINGS =====
     SERVER_HOST = os.getenv('SERVER_HOST', '0.0.0.0')
@@ -30,8 +29,8 @@ class Config:
     LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     
     # ===== AUDIO PROCESSING =====
-    SAMPLE_RATE = int(os.getenv('SAMPLE_RATE', '24000'))
-    DEFAULT_SAMPLE_RATE = int(os.getenv('DEFAULT_SAMPLE_RATE', '24000'))
+    SAMPLE_RATE = int(os.getenv('SAMPLE_RATE', '8000'))
+    DEFAULT_SAMPLE_RATE = int(os.getenv('DEFAULT_SAMPLE_RATE', '8000')) # Default to 8kHz for Exotel compatibility
     SUPPORTED_SAMPLE_RATES = [8000, 16000, 24000]
     AUDIO_CHUNK_SIZE = int(os.getenv('AUDIO_CHUNK_SIZE', '10'))
     MIN_CHUNK_SIZE_MS = int(os.getenv('MIN_CHUNK_SIZE_MS', '20'))
@@ -46,11 +45,11 @@ class Config:
     EXOTEL_VARIABLE_CHUNK_SUPPORT = os.getenv('EXOTEL_VARIABLE_CHUNK_SUPPORT', 'true').lower() == 'true'
     DYNAMIC_CHUNK_SIZING = os.getenv('DYNAMIC_CHUNK_SIZING', 'true').lower() == 'true'
     
-    # ===== BOT PERSONALITY =====
-    SALES_BOT_NAME = os.getenv('SALES_BOT_NAME', 'Sarah')
-    SALES_REP_NAME = os.getenv('SALES_REP_NAME', 'Sarah')  # Alias for compatibility
-    COMPANY_NAME = os.getenv('COMPANY_NAME', 'TechSolutions Inc.')
-    TEMPERATURE = float(os.getenv('TEMPERATURE', '0.7'))
+    # ===== BOT CONFIG =====
+    SALES_BOT_NAME = os.getenv('SALES_BOT_NAME', 'SalesBot')
+    SALES_REP_NAME = os.getenv('SALES_REP_NAME', 'Sarah')
+    HEALTH_BOT_NAME = os.getenv('HEALTH_BOT_NAME', 'HealthBot')
+    COMPANY_NAME = os.getenv('COMPANY_NAME')
     
     # ===== AI ENGINE PREFERENCES =====
     PRIMARY_STT_PROVIDER = os.getenv('PRIMARY_STT_PROVIDER', 'whisper')
@@ -73,25 +72,6 @@ class Config:
     
     # ===== PRODUCTION MODE =====
     PRODUCTION_MODE = os.getenv('PRODUCTION_MODE', 'false').lower() == 'true'
-    
-    # ===== PRODUCTS/SERVICES CONFIGURATION =====
-    PRODUCTS = [
-        {
-            "name": "AI Voice Assistant Pro",
-            "price": "$99/month",
-            "description": "Advanced AI-powered voice assistant for customer support"
-        },
-        {
-            "name": "Custom Bot Development",
-            "price": "$299/month", 
-            "description": "Tailored voice bot solutions for your specific business needs"
-        },
-        {
-            "name": "Enterprise Voice Platform",
-            "price": "$599/month",
-            "description": "Full-scale voice AI platform with analytics and integrations"
-        }
-    ]
     
     # ===== VALIDATION =====
     @classmethod
@@ -120,8 +100,7 @@ class Config:
         return {
             'api_key': cls.OPENAI_API_KEY,
             'model': cls.OPENAI_MODEL,
-            'voice': cls.OPENAI_VOICE,
-            'temperature': cls.OPENAI_TEMPERATURE
+            'voice': cls.OPENAI_VOICE
         }
     
     @classmethod
@@ -161,14 +140,40 @@ class Config:
     
     @classmethod
     def get_enhanced_session_config(cls, sample_rate: int, voice: str) -> Dict[str, Any]:
-        """Get enhanced session configuration"""
+        """Get OpenAI Realtime GA session configuration (base, bot-agnostic).
+        
+        Uses the GA API nested audio structure:
+          audio.input.format.type  = "audio/pcmu"  (G.711 μ-law, 8kHz telephony)
+          audio.output.format.type = "audio/pcmu"
+          audio.output.voice       = voice
+          audio.input.turn_detection.*
+          audio.input.transcription.*
+        """
+        # For telephony (8kHz), use G.711 μ-law; for higher rates, keep pcmu (Exotel default)
+        audio_format = 'audio/pcmu' if sample_rate <= 16000 else 'audio/pcm'
+
         return {
+            'type': 'realtime',
             'model': cls.OPENAI_MODEL,
-            'voice': voice,
-            'input_audio_format': 'g711_ulaw',
-            'output_audio_format': 'g711_ulaw',
-            'input_audio_transcription': {'model': 'whisper-1'},
-            'turn_detection': {'type': 'server_vad', 'threshold': 0.5},
-            'temperature': cls.TEMPERATURE,
-            'max_response_output_tokens': 4096
+            'instructions': '',  # Each bot sets its own instructions
+            'output_modalities': ['audio'],
+            'audio': {
+                'input': {
+                    'format': {'type': audio_format},
+                    'transcription': {'model': 'whisper-1'},
+                    'turn_detection': {
+                        'type': 'server_vad',
+                        'threshold': 0.5,
+                        'silence_duration_ms': 200,
+                        'prefix_padding_ms': 300,
+                        'create_response': True,
+                        'interrupt_response': True,
+                    }
+                },
+                'output': {
+                    'format': {'type': audio_format},
+                    'voice': voice
+                }
+            },
+            'max_output_tokens': 4096,
         } 

@@ -70,13 +70,13 @@ AUDIO_CHUNK_SIZE=200
 
 ```bash
 # Start the bot
-python main.py
+python main.py [--sales-bot|--health-bot]
 
 # Test the configuration
-python main.py --config-check
+python main.py [--sales-bot|--health-bot] --config-check
 
 # Run system tests
-python main.py --test
+python main.py [--sales-bot|--health-bot] --test
 ```
 
 The bot will start a WebSocket server on `0.0.0.0:5000`.
@@ -112,10 +112,12 @@ The bot will start a WebSocket server on `0.0.0.0:5000`.
 ├── LICENSE              # Project license
 ├── README.md            # This README file
 ├── config.py            # Centralized configuration
+├── services_config.py   # Routing for services/product information for different bot types
 ├── core/                # Core bot logic and framework
 │   ├── __init__.py
 │   ├── bot_framework.py
-│   └── openai_realtime_sales_bot.py
+│   └── sales_bot.py
+│   └── health_appointment_bot.py
 ├── engines/             # AI engine components (STT, TTS, NLP, etc.)
 │   ├── __init__.py
 │   ├── audio_enhancer.py
@@ -181,10 +183,10 @@ docker run --env-file .env -p 5000:5000 voice-bot
 
 ```bash
 # Test configuration
-python main.py --config-check
+python main.py [--sales-bot|--health-bot] --config-check
 
 # Test bot connection
-python main.py --test
+python main.py [--sales-bot|--health-bot] --test
 ```
 
 ### Manual Testing
@@ -231,18 +233,12 @@ grep "ERROR" logs/bot.log
 4. Test thoroughly
 5. Submit a pull request
 
+# Next steps
+For healthcare bot:
+1. Integrate calendar APIs for realtime appointment scheduling.
+2. Utilise above to expand into appointment reschuduling and cancellations.
+3. Integrate preambles [Refer to OpenAI Realtime documentation : https://developers.openai.com/api/docs/guides/realtime-models-prompting]
+
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🆘 Support
-
-- Check the troubleshooting section in the README
-- Review GitHub Issues for similar problems
-- Post detailed issues with logs and configuration
-
-## 🙏 Acknowledgments
-
-- [Exotel](https://www.exotel.com) for voice streaming services
-- [OpenAI](https://openai.com) for Realtime API
-- [Agent-Stream](https://github.com/exotel/Agent-Stream) for inspiration

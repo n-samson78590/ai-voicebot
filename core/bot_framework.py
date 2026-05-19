@@ -86,7 +86,7 @@ class BotConfiguration:
     
     # Audio Settings
     sample_rates: List[int] = field(default_factory=lambda: [8000, 16000, 24000])
-    preferred_sample_rate: int = 16000
+    preferred_sample_rate: int = 8000
     
     # Capabilities
     capabilities: BotCapabilities = field(default_factory=BotCapabilities)
@@ -651,7 +651,7 @@ class BotManager:
             port = 5000 + len(self.active_bots)
         
         # Import and create the enhanced bot class
-        from openai_realtime_sales_bot import OpenAIRealtimeSalesBot
+        from sales_bot import SalesBot
         
         # Create bot instance with configuration
         bot_instance = DynamicBot(config)
@@ -799,8 +799,8 @@ class DynamicBot:
         self.connections = {}
         
         # Import the enhanced sales bot functionality
-        from openai_realtime_sales_bot import OpenAIRealtimeSalesBot
-        self.bot_class = OpenAIRealtimeSalesBot
+        from sales_bot import SalesBot
+        self.bot_class = SalesBot
         
         logger.info(f"🤖 Created dynamic bot: {config.bot_id}")
     

@@ -163,6 +163,7 @@ class OpenAIRealtimeSalesBot:
         logger.info(f"   📦 Chunk Size: {chunk_size_ms}ms ({chunk_size_bytes} bytes)")
         logger.info(f"   ⚙️ Enhanced Events: {self.exotel_enhanced_events}")
 
+    # CHECK
     async def handle_exotel_connected(self, stream_id: str, data: dict):
         """Handle Exotel connected event with enhanced confirmation"""
         logger.info(f"✅ EXOTEL CONNECTED (ENHANCED): {stream_id}")
