@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from config import Config
+from core.health_prompt_workflow import build_health_appointment_workflow
 from services_config import ServicesConfig
 
 # Configure enhanced logging
@@ -54,6 +55,8 @@ class HealthAppointmentBot:
         self.bot_speaking: Dict[str, bool] = {}
         self.caller_speech_started_at: Dict[str, float] = {}
         self.caller_pending_response: Dict[str, bool] = {}
+        self.pending_call_end: Dict[str, bool] = {}
+        self.booking_ready_to_confirm: Dict[str, bool] = {}
         
         # Default audio configuration
         self.default_sample_rate = Config.DEFAULT_SAMPLE_RATE
@@ -80,6 +83,40 @@ class HealthAppointmentBot:
         logger.info(f"Enhanced Exotel events: {self.exotel_enhanced_events}")
         logger.info(f"Company: {Config.COMPANY_NAME}")
         logger.info(f"Appointment Bot: {Config.HEALTH_BOT_NAME}")
+
+    def _missing_required_appointment_fields(self, args: dict) -> list:
+        """Return required appointment fields that are missing or blank."""
+        required_fields = [
+            "appointment_type",
+            "patient_name",
+            "contact_phone",
+            "preferred_date",
+            "preferred_time",
+        ]
+
+        missing = []
+        for field in required_fields:
+            value = args.get(field)
+            if value is None:
+                missing.append(field)
+                continue
+            if isinstance(value, str) and not value.strip():
+                missing.append(field)
+
+        return missing
+
+    def _is_valid_health_service(self, appointment_type: str) -> bool:
+        """Validate appointment type against configured health services."""
+        if not appointment_type or not isinstance(appointment_type, str):
+            return False
+
+        normalized = appointment_type.strip().lower()
+        valid_services = {
+            service.get("name", "").strip().lower()
+            for service in self.services
+            if service.get("name")
+        }
+        return normalized in valid_services
 
     async def handle_exotel_websocket(self, websocket, path=None):
         """Handle incoming WebSocket connection from Exotel"""
@@ -382,6 +419,7 @@ class HealthAppointmentBot:
             
             # Get GA session configuration
             session_config = Config.get_enhanced_session_config(sample_rate, self.openai_voice)
+            service_names = [service["name"] for service in self.services if service.get("name")]
             session_config['instructions'] = self._get_appointment_instructions()
             session_config['tools'] = [
                 {
@@ -392,13 +430,31 @@ class HealthAppointmentBot:
                         "type": "object",
                         "properties": {
                             "patient_name": {"type": "string", "description": "Full name of patient"},
-                            "appointment_type": {"type": "string", "description": "Type of appointment (General Consultation, Specialized Consultation, Follow-up)"},
+                            "appointment_type": {
+                                "type": "string",
+                                "enum": service_names,
+                                "description": "Type of appointment selected by caller"
+                            },
                             "preferred_date": {"type": "string", "description": "Preferred date (DD-MM-YYYY)"},
                             "preferred_time": {"type": "string", "description": "Preferred time (HH:MM)"},
-                            "contact_phone": {"type": "string", "description": "Patient contact number"},
-                            "medical_history": {"type": "string", "description": "Brief medical history or reason for visit"}
+                            "contact_phone": {"type": "string", "description": "Patient contact number"}
                         },
-                        "required": ["patient_name", "appointment_type", "preferred_date", "contact_phone"]
+                        "required": ["patient_name", "appointment_type", "preferred_date", "preferred_time", "contact_phone"]
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "end_call",
+                    "description": "End the call after final confirmation or invalid input",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {
+                                "type": "string",
+                                "description": "Reason for ending the call"
+                            }
+                        },
+                        "required": ["reason"]
                     }
                 }
             ]
@@ -440,31 +496,11 @@ class HealthAppointmentBot:
 
     def _get_appointment_instructions(self) -> str:
         """Get appointment booking instructions for the bot"""
-        services = "\n".join([f"  - {s['name']} ({s['duration']})" for s in self.services])
-        
-        return f"""
-        You are a helpful hospital appointment booking assistant for {Config.COMPANY_NAME} and you want to be able to schedule an appointment.
-
-        Your goals:
-        1. Greet the user warmly
-        2. Understand their healthcare needs
-        3. Recommend appropriate appointment type
-        4. Collect necessary information
-        5. Confirm appointment details
-
-        Available Services:
-        {services}
-
-        Process:
-        - Ask about their health concern
-        - Categorise concern into whether it requires a general consultation, specialized consultation, or follow-up
-        - Suggest appropriate appointment type
-        - Clarify if appointment is for self or someone else
-        - Collect: full name of caller if appointment is for self else full name of patient, preferred date/time, contact number, medical history
-        - Confirm all details
-        - Thank them for booking
-
-        Be professional, compassionate, and efficient. Always confirm the full appointment details before ending the call."""
+        return build_health_appointment_workflow(
+            Config.COMPANY_NAME,
+            Config.HEALTH_BOT_NAME,
+            self.services,
+        )
 
     def _get_realtime_audio_format(self, session_config: dict, direction: str) -> str:
         """Return the GA Realtime audio format type for input or output."""
@@ -558,8 +594,10 @@ class HealthAppointmentBot:
                     "role": "user",
                     "content": [{
                         "type": "input_text",
-                        "text": f"A patient just called for appointment booking. The connection is running at {sample_rate}Hz audio quality. \
-                        Please greet them warmly and ask how you can help them today."
+                        "text": (
+                            "Caller said hello. Start the appointment workflow now: "
+                            "greet the caller, list available health services, and ask them to choose one service."
+                        )
                     }]
                 }
             }
@@ -570,8 +608,10 @@ class HealthAppointmentBot:
                 "type": "response.create",
                 "response": {
                     "output_modalities": ["audio"],
-                    "instructions": "Give a warm, professional greeting, asking the user how you can assist them with their appointment booking. \
-                    Keep it concise and natural."
+                    "instructions": (
+                        "Follow the configured health-booking workflow exactly. "
+                        "Start with the greeting and service options only."
+                    )
                 }
             }
             await openai_ws.send(json.dumps(response_msg))
@@ -627,6 +667,8 @@ class HealthAppointmentBot:
                     
                     elif event_type == "response.done":
                         await self._flush_output_audio(stream_id)
+                        if self.pending_call_end.get(stream_id):
+                            await self._finalize_call_after_response(stream_id)
                         logger.info(f"Bot response completed for {stream_id}")
                     
                     elif event_type == "session.updated":
@@ -699,6 +741,27 @@ class HealthAppointmentBot:
         queue = self._ensure_output_audio_sender(stream_id)
         await queue.put(None)
 
+    async def _finalize_call_after_response(self, stream_id: str):
+        """End the call after all queued outbound audio has been delivered."""
+        if not self.pending_call_end.pop(stream_id, None):
+            return
+
+        try:
+            queue = self.output_audio_queues.get(stream_id)
+            if queue is not None:
+                await queue.join()
+
+            exotel_conn = self.exotel_connections.get(stream_id)
+            if exotel_conn:
+                exotel_ws = exotel_conn.get("websocket")
+                if exotel_ws and not getattr(exotel_ws, "closed", False):
+                    await exotel_ws.close()
+
+            await self.cleanup_connections(stream_id)
+            logger.info(f"Call terminated for {stream_id}")
+        except Exception as e:
+            logger.error(f"Error terminating call for {stream_id}: {e}")
+
     async def _create_response_for_caller_turn(self, stream_id: str):
         """Ask OpenAI to answer the latest committed caller turn."""
         if stream_id not in self.openai_connections:
@@ -711,8 +774,9 @@ class HealthAppointmentBot:
                 "response": {
                     "output_modalities": ["audio"],
                     "instructions": (
-                        "Respond to the caller's latest message. Keep the reply concise, "
-                        "natural, and focused on collecting appointment details one step at a time."
+                        "Continue the health-booking workflow from the current step. "
+                        "Ask exactly one next question, keep it concise, and do not repeat completed steps "
+                        "unless the caller asked to alter details."
                     )
                 }
             }
@@ -879,28 +943,89 @@ class HealthAppointmentBot:
             call_id = data.get("call_id")
             function_name = data.get("name", "")
             arguments_str = data.get("arguments", "{}")
+            args = json.loads(arguments_str)
             
             logger.info(f"Function call: {function_name}")
             
             if function_name == "book_appointment":
-                args = json.loads(arguments_str)
-                result = await self.book_appointment(args)
-                
-                # Send result back
-                if stream_id in self.openai_connections:
-                    openai_ws = self.openai_connections[stream_id]["websocket"]
-                    
-                    result_msg = {
-                        "type": "conversation.item.create",
-                        "item": {
-                            "type": "function_call_result",
-                            "call_id": call_id,
-                            "result": json.dumps(result)
-                        }
+                missing_fields = self._missing_required_appointment_fields(args)
+                appointment_type = args.get("appointment_type", "")
+
+                if missing_fields:
+                    self.booking_ready_to_confirm[stream_id] = False
+                    result = {
+                        "status": "error",
+                        "error": "missing_required_fields",
+                        "missing_fields": missing_fields,
+                        "message": (
+                            "Cannot book appointment until all required details are explicitly collected "
+                            "from the caller."
+                        ),
                     }
-                    await openai_ws.send(json.dumps(result_msg))
-                    
-                    logger.info(f"Appointment booking processed")
+                elif not self._is_valid_health_service(appointment_type):
+                    self.booking_ready_to_confirm[stream_id] = False
+                    result = {
+                        "status": "error",
+                        "error": "invalid_appointment_type",
+                        "message": "Selected service is not a valid health service option.",
+                    }
+                else:
+                    result = await self.book_appointment(args)
+                    self.booking_ready_to_confirm[stream_id] = True
+            elif function_name == "end_call":
+                result = await self.end_call(stream_id, args)
+            else:
+                result = {
+                    "status": "error",
+                    "message": f"Unknown function: {function_name}"
+                }
+                
+            if stream_id in self.openai_connections:
+                openai_ws = self.openai_connections[stream_id]["websocket"]
+
+                result_msg = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(result)
+                    }
+                }
+                await openai_ws.send(json.dumps(result_msg))
+
+                follow_up_instruction = (
+                    "Use the function result and continue the workflow naturally in one concise reply."
+                )
+                if function_name == "book_appointment" and result.get("status") == "error":
+                    missing = result.get("missing_fields", [])
+                    if missing:
+                        missing_text = ", ".join(missing)
+                        follow_up_instruction = (
+                            f"Booking was rejected because required details are missing: {missing_text}. "
+                            "Ask for only the next missing detail from the caller, repeat it back, "
+                            "and continue until all required details are captured."
+                        )
+                    else:
+                        follow_up_instruction = (
+                            "Booking was rejected because the selected service is invalid. "
+                            "Ask the caller to choose one valid service option."
+                        )
+                if function_name == "end_call":
+                    follow_up_instruction = (
+                        "Give a short polite closing line if not already spoken. "
+                        "Do not ask any follow-up questions."
+                    )
+
+                response_msg = {
+                    "type": "response.create",
+                    "response": {
+                        "output_modalities": ["audio"],
+                        "instructions": follow_up_instruction,
+                    },
+                }
+                await openai_ws.send(json.dumps(response_msg))
+
+                logger.info(f"Processed function call: {function_name}")
                     
         except Exception as e:
             logger.error(f"Error handling function call: {e}")
@@ -920,6 +1045,31 @@ class HealthAppointmentBot:
             "time": args.get('preferred_time'),
             "contact": args.get('contact_phone'),
             "booking_time": time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+
+
+    async def end_call(self, stream_id: str, args: dict) -> dict:
+        """Mark a call for clean termination after final audio is sent."""
+        reason = args.get("reason", "unspecified")
+
+        if reason == "appointment_confirmed" and not self.booking_ready_to_confirm.get(stream_id, False):
+            return {
+                "status": "error",
+                "error": "booking_not_ready",
+                "message": (
+                    "Cannot end call as appointment confirmed before collecting all required details "
+                    "and successfully booking."
+                ),
+            }
+
+        self.pending_call_end[stream_id] = True
+        self.booking_ready_to_confirm[stream_id] = False
+        logger.info(f"Call end requested for {stream_id}: {reason}")
+        return {
+            "status": "success",
+            "message": "Call scheduled to end",
+            "reason": reason,
+            "ended_at": time.strftime('%Y-%m-%d %H:%M:%S')
         }
 
 
@@ -976,6 +1126,8 @@ class HealthAppointmentBot:
             self.bot_speaking.pop(stream_id, None)
             self.caller_speech_started_at.pop(stream_id, None)
             self.caller_pending_response.pop(stream_id, None)
+            self.pending_call_end.pop(stream_id, None)
+            self.booking_ready_to_confirm.pop(stream_id, None)
 
             stale_resample_keys = [
                 key for key in self.resample_states
