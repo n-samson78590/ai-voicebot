@@ -45,8 +45,15 @@ class HealthAppointmentBot:
         
         # Audio buffering with dynamic sample rate support
         self.audio_buffers: Dict[str, bytes] = {}
+        self.output_audio_buffers: Dict[str, bytes] = {}
+        self.output_audio_queues: Dict[str, asyncio.Queue] = {}
+        self.output_audio_tasks: Dict[str, asyncio.Task] = {}
+        self.resample_states: Dict[Tuple[str, str, int, int], Any] = {}
         self.connection_sample_rates: Dict[str, int] = {}
         self.connection_chunk_sizes: Dict[str, int] = {}
+        self.bot_speaking: Dict[str, bool] = {}
+        self.caller_speech_started_at: Dict[str, float] = {}
+        self.caller_pending_response: Dict[str, bool] = {}
         
         # Default audio configuration
         self.default_sample_rate = Config.DEFAULT_SAMPLE_RATE
@@ -234,8 +241,6 @@ class HealthAppointmentBot:
             logger.warning(f"OpenAI connection not ready for {stream_id}; connecting now")
             await self.ensure_openai_connected(stream_id)
 
-        await asyncio.sleep(0.1) # Small delay to allow connection to establish
-
         if stream_id not in self.openai_connections:
             logger.error(f"Failed to establish OpenAI connection for {stream_id}")
             return
@@ -279,7 +284,15 @@ class HealthAppointmentBot:
         try:
             if stream_id in self.openai_connections:
                 openai_ws = self.openai_connections[stream_id]["websocket"]
-                openai_pcm = self._resample_pcm16(chunk, sample_rate, 24000)
+                if getattr(openai_ws, "closed", False):
+                    logger.warning(f"OpenAI websocket already closed for {stream_id}; dropping caller audio")
+                    return
+                openai_pcm = self._resample_pcm16(
+                    chunk,
+                    sample_rate,
+                    24000,
+                    state_key=(stream_id, "input"),
+                )
                 audio_base64 = base64.b64encode(openai_pcm).decode('utf-8')
                 
                 message = {
@@ -294,6 +307,8 @@ class HealthAppointmentBot:
                 
         except Exception as e:
             logger.error(f"Error sending to OpenAI: {e}")
+            if stream_id in self.openai_connections:
+                self.openai_connections.pop(stream_id, None)
 
 
     async def ensure_openai_connected(self, stream_id: str):
@@ -361,8 +376,8 @@ class HealthAppointmentBot:
                 url,
                 extra_headers=headers,
                 ssl=ssl_context,
-                ping_interval=20,
-                ping_timeout=10
+                ping_interval=15,
+                ping_timeout=30
             )
             
             # Get GA session configuration
@@ -401,6 +416,7 @@ class HealthAppointmentBot:
                 "session_ready": False,
                 "greeting_sent": False,
             }
+            self._ensure_output_audio_sender(stream_id)
 
             logger.info(f"OpenAI Realtime CONNECTED for {stream_id} @ {sample_rate}Hz")
             logger.info(f"Audio Format: {input_fmt} → {output_fmt}")
@@ -589,12 +605,28 @@ class HealthAppointmentBot:
                         await self._handle_function_call(stream_id, data)
                     
                     elif event_type == "input_audio_buffer.speech_started":
-                        logger.info(f"Caller started speaking for {stream_id}")
+                        if self.bot_speaking.get(stream_id):
+                            logger.info(f"Ignoring caller speech_started while bot audio is still playing for {stream_id}")
+                        else:
+                            self.caller_speech_started_at[stream_id] = time.time()
+                            self.caller_pending_response[stream_id] = True
+                            logger.info(f"Caller started speaking for {stream_id}")
                     
                     elif event_type == "input_audio_buffer.speech_stopped":
+                        started_at = self.caller_speech_started_at.pop(stream_id, None)
+                        duration_s = time.time() - started_at if started_at else 0
                         logger.info(f"Caller stopped speaking for {stream_id}")
+                        if (
+                            self.caller_pending_response.pop(stream_id, False)
+                            and not self.bot_speaking.get(stream_id)
+                            and duration_s >= 0.25
+                        ):
+                            await self._create_response_for_caller_turn(stream_id)
+                        elif duration_s < 0.25:
+                            logger.info(f"Ignoring very short speech turn for {stream_id}: {duration_s:.2f}s")
                     
                     elif event_type == "response.done":
+                        await self._flush_output_audio(stream_id)
                         logger.info(f"Bot response completed for {stream_id}")
                     
                     elif event_type == "session.updated":
@@ -625,7 +657,7 @@ class HealthAppointmentBot:
 
 
     async def _handle_audio_delta(self, stream_id: str, data: dict):
-        """Handle audio delta from OpenAI and convert it to Exotel PCM16."""
+        """Handle audio delta from OpenAI and queue it for paced Exotel output."""
         try:
             audio_data = data.get("delta", "")
             if not audio_data:
@@ -636,34 +668,136 @@ class HealthAppointmentBot:
 
             # Convert PCM16 24kHz to the Exotel call sample rate before sending.
             sample_rate = self.connection_sample_rates.get(stream_id, 8000)
-            exotel_pcm = self._resample_pcm16(pcm16_bytes, 24000, sample_rate)
+            exotel_pcm = self._resample_pcm16(
+                pcm16_bytes,
+                24000,
+                sample_rate,
+                state_key=(stream_id, "output"),
+            )
             if not exotel_pcm:
                 return
 
             if stream_id in self.exotel_connections:
-                try:
-                    frames_sent, frame_size = await self._send_pcm_audio_to_exotel(stream_id, exotel_pcm)
-                    logger.info("SENT AUDIO TO EXOTEL: %s bytes (PCM16 %sHz) as %s frames x %s bytes", len(exotel_pcm), sample_rate, frames_sent, frame_size)
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning(f"Exotel connection closed for {stream_id}, dropping audio chunk")
+                queue = self._ensure_output_audio_sender(stream_id)
+                self.bot_speaking[stream_id] = True
+                await queue.put(exotel_pcm)
+                logger.debug(
+                    "QUEUED AUDIO FOR EXOTEL: %s bytes (PCM16 %sHz); queue depth=%s",
+                    len(exotel_pcm),
+                    sample_rate,
+                    queue.qsize(),
+                )
 
         except Exception as e:
             logger.error(f"Error handling audio delta: {e}")
 
-    async def _send_pcm_audio_to_exotel(self, stream_id: str, pcm_bytes: bytes) -> Tuple[int, int]:
+    async def _flush_output_audio(self, stream_id: str):
+        """Flush any partial outbound audio frame at a real response boundary."""
+        if stream_id not in self.exotel_connections:
+            return
+
+        queue = self._ensure_output_audio_sender(stream_id)
+        await queue.put(None)
+
+    async def _create_response_for_caller_turn(self, stream_id: str):
+        """Ask OpenAI to answer the latest committed caller turn."""
+        if stream_id not in self.openai_connections:
+            return
+
+        try:
+            openai_ws = self.openai_connections[stream_id]["websocket"]
+            response_msg = {
+                "type": "response.create",
+                "response": {
+                    "output_modalities": ["audio"],
+                    "instructions": (
+                        "Respond to the caller's latest message. Keep the reply concise, "
+                        "natural, and focused on collecting appointment details one step at a time."
+                    )
+                }
+            }
+            await openai_ws.send(json.dumps(response_msg))
+            logger.info(f"Created response for caller turn: {stream_id}")
+        except Exception as e:
+            logger.error(f"Error creating caller response: {e}")
+
+    def _ensure_output_audio_sender(self, stream_id: str) -> asyncio.Queue:
+        """Ensure one non-blocking paced sender exists for outbound audio."""
+        queue = self.output_audio_queues.get(stream_id)
+        task = self.output_audio_tasks.get(stream_id)
+        if queue is None:
+            queue = asyncio.Queue()
+            self.output_audio_queues[stream_id] = queue
+        if task is None or task.done():
+            self.output_audio_tasks[stream_id] = asyncio.create_task(
+                self._run_output_audio_sender(stream_id, queue)
+            )
+        return queue
+
+    async def _run_output_audio_sender(self, stream_id: str, queue: asyncio.Queue):
+        """Send queued PCM16 audio to Exotel in 20ms frames without blocking OpenAI reads."""
+        try:
+            while True:
+                item = await queue.get()
+                try:
+                    if item is None:
+                        await self._send_buffered_audio_frames(stream_id, pad_final=True)
+                        self.bot_speaking[stream_id] = False
+                        logger.info(f"Outbound bot audio drained for {stream_id}")
+                    else:
+                        self.output_audio_buffers[stream_id] = (
+                            self.output_audio_buffers.get(stream_id, b"") + item
+                        )
+                        await self._send_buffered_audio_frames(stream_id, pad_final=False)
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning(f"Exotel connection closed for {stream_id}, stopping audio sender")
+        except Exception as e:
+            logger.error(f"Error in outbound audio sender for {stream_id}: {e}")
+
+    async def _send_buffered_audio_frames(self, stream_id: str, pad_final: bool):
+        pending_audio = self.output_audio_buffers.get(stream_id, b"")
+        if not pending_audio or stream_id not in self.exotel_connections:
+            return
+
+        frames_sent, frame_size, remainder = await self._send_pcm_audio_to_exotel(
+            stream_id,
+            pending_audio,
+            pad_final=pad_final,
+        )
+        self.output_audio_buffers[stream_id] = remainder
+        sample_rate = self.connection_sample_rates.get(stream_id, 8000)
+        sent_bytes = len(pending_audio) - len(remainder)
+        if frames_sent:
+            logger.info(
+                "SENT AUDIO TO EXOTEL: %s bytes (PCM16 %sHz) as %s frames x %s bytes; %s buffered",
+                sent_bytes,
+                sample_rate,
+                frames_sent,
+                frame_size,
+                len(remainder),
+            )
+
+    async def _send_pcm_audio_to_exotel(
+        self,
+        stream_id: str,
+        pcm_bytes: bytes,
+        pad_final: bool = False,
+    ) -> Tuple[int, int, bytes]:
         """Send PCM16 audio to Exotel in 20ms paced frames to avoid accelerated playback."""
         exotel_ws = self.exotel_connections[stream_id]["websocket"]
         sample_rate = self.connection_sample_rates.get(stream_id, 8000)
         frame_size = max(2, int(sample_rate * self.exotel_output_frame_ms / 1000) * 2)
         frame_delay_s = self.exotel_output_frame_ms / 1000.0
+        full_frame_bytes = (len(pcm_bytes) // frame_size) * frame_size
+        remainder = pcm_bytes[full_frame_bytes:]
 
         frames_sent = 0
-        for offset in range(0, len(pcm_bytes), frame_size):
+        for offset in range(0, full_frame_bytes, frame_size):
             frame = pcm_bytes[offset: offset + frame_size]
-
-            # Pad final partial frame with PCM silence to keep frame timing aligned.
-            if len(frame) < frame_size:
-                frame += b"\x00" * (frame_size - len(frame))
 
             media_msg = {
                 "event": "media",
@@ -676,12 +810,34 @@ class HealthAppointmentBot:
             await exotel_ws.send(json.dumps(media_msg))
             frames_sent += 1
 
-            if offset + frame_size < len(pcm_bytes):
+            if offset + frame_size < full_frame_bytes:
                 await asyncio.sleep(frame_delay_s)
 
-        return frames_sent, frame_size
+        if pad_final and remainder:
+            frame = remainder + b"\x00" * (frame_size - len(remainder))
+            media_msg = {
+                "event": "media",
+                "streamSid": stream_id,
+                "stream_sid": stream_id,
+                "media": {
+                    "payload": base64.b64encode(frame).decode('utf-8')
+                }
+            }
+            if frames_sent:
+                await asyncio.sleep(frame_delay_s)
+            await exotel_ws.send(json.dumps(media_msg))
+            frames_sent += 1
+            remainder = b""
 
-    def _resample_pcm16(self, pcm16_bytes: bytes, source_rate: int, target_rate: int) -> bytes:
+        return frames_sent, frame_size, remainder
+
+    def _resample_pcm16(
+        self,
+        pcm16_bytes: bytes,
+        source_rate: int,
+        target_rate: int,
+        state_key: Optional[Tuple[str, str]] = None,
+    ) -> bytes:
         """Resample mono PCM16 audio between call and OpenAI sample rates."""
         if not pcm16_bytes:
             return b''
@@ -691,7 +847,15 @@ class HealthAppointmentBot:
         # Prefer audioop for robust telephony-grade downsampling.
         try:
             import audioop
-            pcm_bytes, _state = audioop.ratecv(pcm16_bytes, 2, 1, source_rate, target_rate, None)
+            state_lookup_key = None
+            state = None
+            if state_key:
+                state_lookup_key = (state_key[0], state_key[1], source_rate, target_rate)
+                state = self.resample_states.get(state_lookup_key)
+
+            pcm_bytes, state = audioop.ratecv(pcm16_bytes, 2, 1, source_rate, target_rate, state)
+            if state_lookup_key:
+                self.resample_states[state_lookup_key] = state
             return pcm_bytes
         except ImportError:
             pass
@@ -795,6 +959,32 @@ class HealthAppointmentBot:
             if stream_id in self.audio_buffers:
                 del self.audio_buffers[stream_id]
                 logger.info(f"Cleared audio buffer for {stream_id}")
+
+            if stream_id in self.output_audio_buffers:
+                del self.output_audio_buffers[stream_id]
+                logger.info(f"Cleared output audio buffer for {stream_id}")
+
+            if stream_id in self.output_audio_queues:
+                del self.output_audio_queues[stream_id]
+                logger.info(f"Cleared output audio queue for {stream_id}")
+
+            if stream_id in self.output_audio_tasks:
+                task = self.output_audio_tasks.pop(stream_id)
+                task.cancel()
+                logger.info(f"Cancelled output audio sender for {stream_id}")
+
+            self.bot_speaking.pop(stream_id, None)
+            self.caller_speech_started_at.pop(stream_id, None)
+            self.caller_pending_response.pop(stream_id, None)
+
+            stale_resample_keys = [
+                key for key in self.resample_states
+                if key[0] == stream_id
+            ]
+            for key in stale_resample_keys:
+                del self.resample_states[key]
+            if stale_resample_keys:
+                logger.info(f"Cleared resampler state for {stream_id}")
             
             if stream_id in self.connection_sample_rates:
                 del self.connection_sample_rates[stream_id]

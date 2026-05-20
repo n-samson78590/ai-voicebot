@@ -163,10 +163,10 @@ class Config:
                     'transcription': {'model': 'whisper-1'},
                     'turn_detection': {
                         'type': 'server_vad',
-                        'threshold': 0.5,
-                        'silence_duration_ms': 200,
+                        'threshold': 0.65,
+                        'silence_duration_ms': 500,
                         'prefix_padding_ms': 300,
-                        'create_response': True,
+                        'create_response': False,
                         'interrupt_response': True,
                     }
                 },
