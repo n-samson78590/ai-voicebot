@@ -143,15 +143,15 @@ class Config:
         """Get OpenAI Realtime GA session configuration (base, bot-agnostic).
         
         Uses the GA API nested audio structure:
-          audio.input.format.type  = "audio/pcmu"  (G.711 μ-law, 8kHz telephony)
-          audio.output.format.type = "audio/pcmu"
+          audio.input.format.type  = "audio/pcm"  (16-bit linear PCM)
+          audio.output.format.type = "audio/pcm"
           audio.output.voice       = voice
           audio.input.turn_detection.*
           audio.input.transcription.*
         """
-        # For telephony (8kHz), use G.711 μ-law; for higher rates, keep pcmu (Exotel default)
-        audio_format = 'audio/pcmu' if sample_rate <= 16000 else 'audio/pcm'
-
+        # Exotel sends 8kHz/128kbps media as 16-bit linear PCM.
+        # Output: always request PCM16 (audio/pcm at 24kHz) so we get a known, reliable format
+        #         that can be deterministically resampled before sending to Exotel.
         return {
             'type': 'realtime',
             'model': cls.OPENAI_MODEL,
@@ -159,7 +159,7 @@ class Config:
             'output_modalities': ['audio'],
             'audio': {
                 'input': {
-                    'format': {'type': audio_format},
+                    'format': {'type': 'audio/pcm', 'rate': 24000},
                     'transcription': {'model': 'whisper-1'},
                     'turn_detection': {
                         'type': 'server_vad',
@@ -171,7 +171,7 @@ class Config:
                     }
                 },
                 'output': {
-                    'format': {'type': audio_format},
+                    'format': {'type': 'audio/pcm'},  # PCM16 24kHz; resampled before sending to Exotel
                     'voice': voice
                 }
             },

@@ -15,6 +15,7 @@ import struct
 import ssl
 import os
 import re
+import numpy as np
 from typing import Dict, Any, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 import sys
@@ -51,6 +52,7 @@ class HealthAppointmentBot:
         self.default_sample_rate = Config.DEFAULT_SAMPLE_RATE
         self.min_chunk_size_ms = Config.MIN_CHUNK_SIZE_MS
         self.buffer_size_ms = Config.BUFFER_SIZE_MS
+        self.exotel_output_frame_ms = 20
         
         # OpenAI Configuration
         self.openai_api_key = Config.OPENAI_API_KEY
@@ -277,14 +279,18 @@ class HealthAppointmentBot:
         try:
             if stream_id in self.openai_connections:
                 openai_ws = self.openai_connections[stream_id]["websocket"]
-                audio_base64 = base64.b64encode(chunk).decode('utf-8')
+                openai_pcm = self._resample_pcm16(chunk, sample_rate, 24000)
+                audio_base64 = base64.b64encode(openai_pcm).decode('utf-8')
                 
                 message = {
                     "type": "input_audio_buffer.append",
                     "audio": audio_base64
                 }
                 await openai_ws.send(json.dumps(message))
-                logger.debug(f"Sent {len(chunk)} bytes to OpenAI for {stream_id}")
+                logger.debug(
+                    f"Sent {len(openai_pcm)} bytes PCM16 24kHz to OpenAI "
+                    f"from {len(chunk)} bytes PCM16 {sample_rate}Hz for {stream_id}"
+                )
                 
         except Exception as e:
             logger.error(f"Error sending to OpenAI: {e}")
@@ -382,23 +388,22 @@ class HealthAppointmentBot:
                 }
             ]
             
-            session_config["input_audio_format"] = self._get_realtime_audio_format(session_config, "input")
-            session_config["output_audio_format"] = self._get_realtime_audio_format(session_config, "output")
-            session_config["voice"] = session_config.get("audio", {}).get("output", {}).get("voice", self.openai_voice)
-            
+            input_fmt = session_config.get("audio", {}).get("input", {}).get("format", {}).get("type", "audio/pcm")
+            output_fmt = session_config.get("audio", {}).get("output", {}).get("format", {}).get("type", "audio/pcm")
+
             self.openai_connections[stream_id] = {
                 "websocket": openai_ws,
                 "start_time": time.time(),
                 "sample_rate": sample_rate,
-                "input_format": self._get_realtime_audio_format(session_config, "input"),
-                "output_format": self._get_realtime_audio_format(session_config, "output"),
+                "input_format": input_fmt,
+                "output_format": output_fmt,
                 "session_config": session_config,
                 "session_ready": False,
                 "greeting_sent": False,
             }
-            
+
             logger.info(f"OpenAI Realtime CONNECTED for {stream_id} @ {sample_rate}Hz")
-            logger.info(f"Audio Format: {session_config['input_audio_format']} → {session_config['output_audio_format']}")
+            logger.info(f"Audio Format: {input_fmt} → {output_fmt}")
             
             # Start listening before session.update so errors/session.updated/audio are not missed.
             asyncio.create_task(self.handle_openai_responses(stream_id, openai_ws))
@@ -450,8 +455,8 @@ class HealthAppointmentBot:
         audio_config = session_config.get("audio", {}).get(direction, {})
         format_config = audio_config.get("format", {})
         if isinstance(format_config, dict):
-            return format_config.get("type", "audio/pcmu")
-        return format_config or "audio/pcmu"
+            return format_config.get("type", "audio/pcm")
+        return format_config or "audio/pcm"
 
 
     def _realtime_session_payload(self, session_config: dict) -> dict:
@@ -472,19 +477,51 @@ class HealthAppointmentBot:
             openai_ws = openai_connection["websocket"]
             session_config = openai_connection["session_config"]
             sample_rate = openai_connection["sample_rate"]
+
+            # Build health-bot payload and enforce required GA audio format rates.
+            session_payload = self._realtime_session_payload(session_config)
+            audio_cfg = session_payload.setdefault("audio", {})
+
+            input_cfg = audio_cfg.setdefault("input", {})
+            input_format = input_cfg.get("format", {})
+            if not isinstance(input_format, dict):
+                input_format = {"type": input_format or "audio/pcm"}
+                input_cfg["format"] = input_format
+            input_type = input_format.get("type", "audio/pcm")
+
+            if input_type == "audio/pcm":
+                input_format["rate"] = 24000
+            elif "rate" not in input_format:
+                input_format["rate"] = sample_rate if sample_rate in Config.SUPPORTED_SAMPLE_RATES else 24000
+
+            output_cfg = audio_cfg.setdefault("output", {})
+            output_format = output_cfg.get("format", {})
+            if not isinstance(output_format, dict):
+                output_format = {"type": output_format or "audio/pcm"}
+                output_cfg["format"] = output_format
+            output_type = output_format.get("type", "audio/pcm")
+            if "rate" not in output_format:
+                output_format["rate"] = 24000 if output_type == "audio/pcm" else 8000
             
             # Send GA session configuration
             session_update = {
                 "type": "session.update",
-                "session": self._realtime_session_payload(session_config)
+                "session": session_payload
             }
             
             await openai_ws.send(json.dumps(session_update))
+            input_fmt = input_format.get("type", "audio/pcm")
+            input_rate = input_format.get("rate", "n/a")
+            output_fmt = output_format.get("type", "audio/pcm")
+            output_rate = output_format.get("rate", 24000)
+            voice = output_cfg.get("voice", self.openai_voice)
             logger.info(f"GA OPENAI SESSION CONFIGURED for {stream_id}")
-            logger.info(f"Sample Rate: {sample_rate}Hz")
-            logger.info(f"Input Format: {session_config['input_audio_format']}")
-            logger.info(f"Output Format: {session_config['output_audio_format']}")
-            logger.info(f"Voice: {session_config['voice']}")
+            logger.info(
+                f"Sample Rate: {sample_rate}Hz | "
+                f"Input: {input_fmt}@{input_rate}Hz | "
+                f"Output: {output_fmt}@{output_rate}Hz | "
+                f"Voice: {voice}"
+            )
             
         except Exception as e:
             logger.error(f"Error configuring GA OpenAI session: {e}")
@@ -568,7 +605,15 @@ class HealthAppointmentBot:
                                 await self.send_initial_greeting(stream_id)
                     
                     elif event_type == "error":
-                        logger.error(f"OpenAI error: {data}")
+                        error = data.get("error", {})
+                        logger.error(
+                            "OpenAI error: type=%s code=%s param=%s message=%s",
+                            error.get("type"),
+                            error.get("code"),
+                            error.get("param"),
+                            error.get("message"),
+                        )
+                        logger.debug(f"OpenAI error payload: {data}")
                     
                 except json.JSONDecodeError as e:
                     logger.error(f"JSON decode error from OpenAI: {e}")
@@ -579,30 +624,89 @@ class HealthAppointmentBot:
             logger.error(f"Error in OpenAI response handler: {e}")
 
 
-    async def _handle_audio_delta (self, stream_id: str, data: dict): # handle_exotel_connected
-        """Handle audio delta from OpenAI"""
+    async def _handle_audio_delta(self, stream_id: str, data: dict):
+        """Handle audio delta from OpenAI and convert it to Exotel PCM16."""
         try:
             audio_data = data.get("delta", "")
-            if audio_data:
-                audio_bytes = base64.b64decode(audio_data)
-                logger.info(f"AUDIO DELTA RECEIVED: {len(audio_bytes)} bytes")
-                
-                # Send to Exotel
-                if stream_id in self.exotel_connections:
-                    exotel_ws = self.exotel_connections[stream_id]["websocket"]
-                    
-                    media_msg = {
-                        "event": "media",
-                        "streamSid": stream_id,
-                        "media": {
-                            "payload": base64.b64encode(audio_bytes).decode('utf-8')
-                        }
-                    }
-                    await exotel_ws.send(json.dumps(media_msg))
-                    logger.info(f"SENT AUDIO TO EXOTEL: {len(audio_bytes)} bytes")
-                    
+            if not audio_data:
+                return
+
+            pcm16_bytes = base64.b64decode(audio_data)
+            logger.info(f"AUDIO DELTA RECEIVED: {len(pcm16_bytes)} bytes (PCM16 24kHz)")
+
+            # Convert PCM16 24kHz to the Exotel call sample rate before sending.
+            sample_rate = self.connection_sample_rates.get(stream_id, 8000)
+            exotel_pcm = self._resample_pcm16(pcm16_bytes, 24000, sample_rate)
+            if not exotel_pcm:
+                return
+
+            if stream_id in self.exotel_connections:
+                try:
+                    frames_sent, frame_size = await self._send_pcm_audio_to_exotel(stream_id, exotel_pcm)
+                    logger.info("SENT AUDIO TO EXOTEL: %s bytes (PCM16 %sHz) as %s frames x %s bytes", len(exotel_pcm), sample_rate, frames_sent, frame_size)
+                except websockets.exceptions.ConnectionClosed:
+                    logger.warning(f"Exotel connection closed for {stream_id}, dropping audio chunk")
+
         except Exception as e:
             logger.error(f"Error handling audio delta: {e}")
+
+    async def _send_pcm_audio_to_exotel(self, stream_id: str, pcm_bytes: bytes) -> Tuple[int, int]:
+        """Send PCM16 audio to Exotel in 20ms paced frames to avoid accelerated playback."""
+        exotel_ws = self.exotel_connections[stream_id]["websocket"]
+        sample_rate = self.connection_sample_rates.get(stream_id, 8000)
+        frame_size = max(2, int(sample_rate * self.exotel_output_frame_ms / 1000) * 2)
+        frame_delay_s = self.exotel_output_frame_ms / 1000.0
+
+        frames_sent = 0
+        for offset in range(0, len(pcm_bytes), frame_size):
+            frame = pcm_bytes[offset: offset + frame_size]
+
+            # Pad final partial frame with PCM silence to keep frame timing aligned.
+            if len(frame) < frame_size:
+                frame += b"\x00" * (frame_size - len(frame))
+
+            media_msg = {
+                "event": "media",
+                "streamSid": stream_id,
+                "stream_sid": stream_id,
+                "media": {
+                    "payload": base64.b64encode(frame).decode('utf-8')
+                }
+            }
+            await exotel_ws.send(json.dumps(media_msg))
+            frames_sent += 1
+
+            if offset + frame_size < len(pcm_bytes):
+                await asyncio.sleep(frame_delay_s)
+
+        return frames_sent, frame_size
+
+    def _resample_pcm16(self, pcm16_bytes: bytes, source_rate: int, target_rate: int) -> bytes:
+        """Resample mono PCM16 audio between call and OpenAI sample rates."""
+        if not pcm16_bytes:
+            return b''
+        if source_rate == target_rate:
+            return pcm16_bytes
+
+        # Prefer audioop for robust telephony-grade downsampling.
+        try:
+            import audioop
+            pcm_bytes, _state = audioop.ratecv(pcm16_bytes, 2, 1, source_rate, target_rate, None)
+            return pcm_bytes
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"audioop conversion failed, using numpy fallback: {e}")
+
+        samples = np.frombuffer(pcm16_bytes, dtype=np.int16)
+
+        # Fallback resample with linear interpolation.
+        target_length = int(len(samples) * target_rate / source_rate)
+        if target_length <= 0:
+            return b''
+        source_positions = np.linspace(0, len(samples) - 1, target_length)
+        resampled = np.interp(source_positions, np.arange(len(samples)), samples).astype(np.int16)
+        return resampled.tobytes()
 
 
     async def _handle_function_call(self, stream_id: str, data: dict):
