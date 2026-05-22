@@ -90,7 +90,7 @@ The bot will start a WebSocket server on `0.0.0.0:5000`.
 
 ### Exotel Voicebot Applet Configuration
 
-1. **URL:** `wss://your-domain.com/?sample-rate=24000` 
+1. **URL:** `wss://your-domain.com/?sample-rate=8000` 
    Recommended to include sample rate as a query parameter for proper audio handling.
    Limit sample rate to 8000 for improved Exotel side handling.
 2. **Sample Rate:** 8kHz (recommended for telephony, but can be configured up to 24kHz for better quality if Exotel supports it)
