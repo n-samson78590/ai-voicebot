@@ -1,18 +1,18 @@
-# 🤖 Voice AI Bot System
+# Voice AI Bot System
 
-A production-ready, conversational AI voice bot that bridges **Exotel's WebSocket streaming** with **OpenAI's Realtime API** for natural, speech-to-speech conversations over phone calls.
+A production-ready, conversational AI voice bot for appointment booking that bridges **Exotel's WebSocket streaming** with **OpenAI's Realtime API** for natural, speech-to-speech conversations over phone calls. 
 
-## 🎯 What This Bot Does
+## What This Bot Does
 
-* **🗣️ Natural Conversations**: Real-time speech-to-speech using OpenAI's latest Realtime API
-* **📞 Telephony Integration**: Seamless integration with Exotel's voice streaming services
-* **🛑 Smart Interruption**: Handles conversation interruptions naturally
-* **🔊 Audio Enhancement**: Built-in noise suppression and audio optimization for telephony
-* **⚡ Real-time Processing**: 200ms audio buffering for smooth conversation flow
-* **🔒 Security First**: Environment-based configuration, no hardcoded secrets
-* **🎵 High-Quality Audio**: 24kHz PCM16 audio format for superior voice quality
+* **Natural Conversations**: Real-time speech-to-speech using OpenAI's latest Realtime API
+* **Telephony Integration**: Seamless integration with Exotel's voice streaming services
+* **Smart Interruption**: Handles conversation interruptions naturally
+* **Audio Enhancement**: Built-in noise suppression and audio optimization for telephony
+* **Real-time Processing**: 200ms audio buffering for smooth conversation flow
+* **Security First**: Environment-based configuration, no hardcoded secrets
+* **High-Quality Audio**: 24kHz PCM16 audio format for superior voice quality
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -81,7 +81,7 @@ python main.py [--sales-bot|--health-bot] --test
 
 The bot will start a WebSocket server on `0.0.0.0:5000`.
 
-## 📡 Exotel Integration
+## Exotel Integration
 
 ### WebSocket URLs
 
@@ -90,8 +90,10 @@ The bot will start a WebSocket server on `0.0.0.0:5000`.
 
 ### Exotel Voicebot Applet Configuration
 
-1. **URL:** `wss://your-domain.com/?sample-rate=24000`
-2. **Sample Rate:** 24kHz (recommended for high quality)
+1. **URL:** `wss://your-domain.com/?sample-rate=24000` 
+   Recommended to include sample rate as a query parameter for proper audio handling.
+   Limit sample rate to 8000 for improved Exotel side handling.
+2. **Sample Rate:** 8kHz (recommended for telephony, but can be configured up to 24kHz for better quality if Exotel supports it)
 3. **Audio Format:** Raw/slin (16-bit PCM)
 4. **Bidirectional Streaming:** Enabled
 
@@ -103,35 +105,39 @@ The bot will start a WebSocket server on `0.0.0.0:5000`.
 }
 ```
 
-## 🏗️ Project Structure
+## Project Structure
 
 ```
 .
-├── .env                 # Environment variables (local)
-├── .gitignore           # Git ignore file
-├── LICENSE              # Project license
-├── README.md            # This README file
-├── config.py            # Centralized configuration
-├── services_config.py   # Routing for services/product information for different bot types
-├── core/                # Core bot logic and framework
+├── .env                            # Environment variables (local)
+├── .gitignore                      # Git ignore file
+├── LICENSE                         # Project license
+├── README.md                       # This README file
+├── config.py                       # Centralized configuration
+├── services_config.py              # Routing for services/product information for different bot types
+├── core/                           # Core bot logic and framework
 │   ├── __init__.py
 │   ├── bot_framework.py
-│   └── sales_bot.py
-│   └── health_appointment_bot.py
-├── engines/             # AI engine components (STT, TTS, NLP, etc.)
+│   ├── bot_launcher.py
+│   ├── sales_bot.py 
+│   └── health_appointment_bot.py   # Healthcare appointment booking bot logic
+│   └── health_prompt_workflow.py   # Optimised prompt workflow for healthcare bot
+├── engines/                        # AI engine components (STT, TTS, NLP, etc.)
 │   ├── __init__.py
 │   ├── audio_enhancer.py
 │   ├── media_resampler.py
 │   ├── nlp_engine.py
 │   ├── stt_engine.py
 │   └── tts_engine.py
-├── env.example          # Example environment variables
-├── main.py              # Main entry point for the application
-├── requirements.txt     # Python dependencies
-└── venv/                # Python virtual environment
+├── legacy/ 
+│   └── sales_bot_legacy.py         # Legacy sales bot code using deprecated Realtime Beta API (for reference)
+├── env.example                     # Example environment variables
+├── main.py                         # Main entry point for the application
+├── requirements.txt                # Python dependencies
+└── venv/                           # Python virtual environment
 ```
 
-## 🔧 Configuration Options
+## Configuration Options
 
 ### Audio Settings
 
@@ -150,7 +156,7 @@ The bot will start a WebSocket server on `0.0.0.0:5000`.
 - **SERVER_HOST:** Server host (default: 0.0.0.0)
 - **SERVER_PORT:** Server port (default: 5000)
 
-## 🚀 Deployment
+## Deployment
 
 ### Option 1: Development (ngrok)
 
@@ -177,7 +183,7 @@ docker build -t voice-bot .
 docker run --env-file .env -p 5000:5000 voice-bot
 ```
 
-## 🧪 Testing
+## Testing
 
 ### Basic Tests
 
@@ -199,14 +205,14 @@ wscat -c ws://localhost:5000
 {"event": "connected"}
 ```
 
-## 🔒 Security
+## Security
 
 - All sensitive information is stored in environment variables
 - No hardcoded API keys or tokens
 - `.env` file is gitignored
 - Use HTTPS/WSS in production
 
-## 📊 Monitoring
+## Monitoring
 
 ### Key Metrics
 
@@ -225,7 +231,7 @@ grep "CONVERSATION COMPLETED" logs/bot.log
 grep "ERROR" logs/bot.log
 ```
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch
@@ -236,9 +242,12 @@ grep "ERROR" logs/bot.log
 # Next steps
 For healthcare bot:
 1. Integrate calendar APIs for realtime appointment scheduling.
-2. Utilise above to expand into appointment reschuduling and cancellations.
-3. Integrate preambles [Refer to OpenAI Realtime documentation : https://developers.openai.com/api/docs/guides/realtime-models-prompting]
+2. Utilise above to expand into reschuduling and cancellations.
+3. Test and improve prompt based on user interactions.
 
-## 📄 License
+# To note
+The temperature parameter has been removed from the API calls. 
+
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
