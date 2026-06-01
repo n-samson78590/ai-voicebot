@@ -15,12 +15,14 @@ import struct
 import ssl
 import os
 import re
+import numpy as np
 from typing import Dict, Any, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 import sys
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from config import Config
+from core.health_prompt_workflow import build_health_appointment_workflow
 from services_config import ServicesConfig
 
 # Configure enhanced logging
@@ -44,13 +46,23 @@ class HealthAppointmentBot:
         
         # Audio buffering with dynamic sample rate support
         self.audio_buffers: Dict[str, bytes] = {}
+        self.output_audio_buffers: Dict[str, bytes] = {}
+        self.output_audio_queues: Dict[str, asyncio.Queue] = {}
+        self.output_audio_tasks: Dict[str, asyncio.Task] = {}
+        self.resample_states: Dict[Tuple[str, str, int, int], Any] = {}
         self.connection_sample_rates: Dict[str, int] = {}
         self.connection_chunk_sizes: Dict[str, int] = {}
+        self.bot_speaking: Dict[str, bool] = {}
+        self.caller_speech_started_at: Dict[str, float] = {}
+        self.caller_pending_response: Dict[str, bool] = {}
+        self.pending_call_end: Dict[str, bool] = {}
+        self.booking_ready_to_confirm: Dict[str, bool] = {}
         
         # Default audio configuration
         self.default_sample_rate = Config.DEFAULT_SAMPLE_RATE
         self.min_chunk_size_ms = Config.MIN_CHUNK_SIZE_MS
         self.buffer_size_ms = Config.BUFFER_SIZE_MS
+        self.exotel_output_frame_ms = 20
         
         # OpenAI Configuration
         self.openai_api_key = Config.OPENAI_API_KEY
@@ -71,6 +83,40 @@ class HealthAppointmentBot:
         logger.info(f"Enhanced Exotel events: {self.exotel_enhanced_events}")
         logger.info(f"Company: {Config.COMPANY_NAME}")
         logger.info(f"Appointment Bot: {Config.HEALTH_BOT_NAME}")
+
+    def _missing_required_appointment_fields(self, args: dict) -> list:
+        """Return required appointment fields that are missing or blank."""
+        required_fields = [
+            "appointment_type",
+            "patient_name",
+            "contact_phone",
+            "preferred_date",
+            "preferred_time",
+        ]
+
+        missing = []
+        for field in required_fields:
+            value = args.get(field)
+            if value is None:
+                missing.append(field)
+                continue
+            if isinstance(value, str) and not value.strip():
+                missing.append(field)
+
+        return missing
+
+    def _is_valid_health_service(self, appointment_type: str) -> bool:
+        """Validate appointment type against configured health services."""
+        if not appointment_type or not isinstance(appointment_type, str):
+            return False
+
+        normalized = appointment_type.strip().lower()
+        valid_services = {
+            service.get("name", "").strip().lower()
+            for service in self.services
+            if service.get("name")
+        }
+        return normalized in valid_services
 
     async def handle_exotel_websocket(self, websocket, path=None):
         """Handle incoming WebSocket connection from Exotel"""
@@ -232,8 +278,6 @@ class HealthAppointmentBot:
             logger.warning(f"OpenAI connection not ready for {stream_id}; connecting now")
             await self.ensure_openai_connected(stream_id)
 
-        await asyncio.sleep(0.1) # Small delay to allow connection to establish
-
         if stream_id not in self.openai_connections:
             logger.error(f"Failed to establish OpenAI connection for {stream_id}")
             return
@@ -277,17 +321,31 @@ class HealthAppointmentBot:
         try:
             if stream_id in self.openai_connections:
                 openai_ws = self.openai_connections[stream_id]["websocket"]
-                audio_base64 = base64.b64encode(chunk).decode('utf-8')
+                if getattr(openai_ws, "closed", False):
+                    logger.warning(f"OpenAI websocket already closed for {stream_id}; dropping caller audio")
+                    return
+                openai_pcm = self._resample_pcm16(
+                    chunk,
+                    sample_rate,
+                    24000,
+                    state_key=(stream_id, "input"),
+                )
+                audio_base64 = base64.b64encode(openai_pcm).decode('utf-8')
                 
                 message = {
                     "type": "input_audio_buffer.append",
                     "audio": audio_base64
                 }
                 await openai_ws.send(json.dumps(message))
-                logger.debug(f"Sent {len(chunk)} bytes to OpenAI for {stream_id}")
+                logger.debug(
+                    f"Sent {len(openai_pcm)} bytes PCM16 24kHz to OpenAI "
+                    f"from {len(chunk)} bytes PCM16 {sample_rate}Hz for {stream_id}"
+                )
                 
         except Exception as e:
             logger.error(f"Error sending to OpenAI: {e}")
+            if stream_id in self.openai_connections:
+                self.openai_connections.pop(stream_id, None)
 
 
     async def ensure_openai_connected(self, stream_id: str):
@@ -355,12 +413,13 @@ class HealthAppointmentBot:
                 url,
                 extra_headers=headers,
                 ssl=ssl_context,
-                ping_interval=20,
-                ping_timeout=10
+                ping_interval=15,
+                ping_timeout=30
             )
             
             # Get GA session configuration
             session_config = Config.get_enhanced_session_config(sample_rate, self.openai_voice)
+            service_names = [service["name"] for service in self.services if service.get("name")]
             session_config['instructions'] = self._get_appointment_instructions()
             session_config['tools'] = [
                 {
@@ -371,34 +430,52 @@ class HealthAppointmentBot:
                         "type": "object",
                         "properties": {
                             "patient_name": {"type": "string", "description": "Full name of patient"},
-                            "appointment_type": {"type": "string", "description": "Type of appointment (General Consultation, Specialized Consultation, Follow-up)"},
+                            "appointment_type": {
+                                "type": "string",
+                                "enum": service_names,
+                                "description": "Type of appointment selected by caller"
+                            },
                             "preferred_date": {"type": "string", "description": "Preferred date (DD-MM-YYYY)"},
                             "preferred_time": {"type": "string", "description": "Preferred time (HH:MM)"},
-                            "contact_phone": {"type": "string", "description": "Patient contact number"},
-                            "medical_history": {"type": "string", "description": "Brief medical history or reason for visit"}
+                            "contact_phone": {"type": "string", "description": "Patient contact number"}
                         },
-                        "required": ["patient_name", "appointment_type", "preferred_date", "contact_phone"]
+                        "required": ["patient_name", "appointment_type", "preferred_date", "preferred_time", "contact_phone"]
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "end_call",
+                    "description": "End the call after final confirmation or invalid input",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {
+                                "type": "string",
+                                "description": "Reason for ending the call"
+                            }
+                        },
+                        "required": ["reason"]
                     }
                 }
             ]
             
-            session_config["input_audio_format"] = self._get_realtime_audio_format(session_config, "input")
-            session_config["output_audio_format"] = self._get_realtime_audio_format(session_config, "output")
-            session_config["voice"] = session_config.get("audio", {}).get("output", {}).get("voice", self.openai_voice)
-            
+            input_fmt = session_config.get("audio", {}).get("input", {}).get("format", {}).get("type", "audio/pcm")
+            output_fmt = session_config.get("audio", {}).get("output", {}).get("format", {}).get("type", "audio/pcm")
+
             self.openai_connections[stream_id] = {
                 "websocket": openai_ws,
                 "start_time": time.time(),
                 "sample_rate": sample_rate,
-                "input_format": self._get_realtime_audio_format(session_config, "input"),
-                "output_format": self._get_realtime_audio_format(session_config, "output"),
+                "input_format": input_fmt,
+                "output_format": output_fmt,
                 "session_config": session_config,
                 "session_ready": False,
                 "greeting_sent": False,
             }
-            
+            self._ensure_output_audio_sender(stream_id)
+
             logger.info(f"OpenAI Realtime CONNECTED for {stream_id} @ {sample_rate}Hz")
-            logger.info(f"Audio Format: {session_config['input_audio_format']} → {session_config['output_audio_format']}")
+            logger.info(f"Audio Format: {input_fmt} → {output_fmt}")
             
             # Start listening before session.update so errors/session.updated/audio are not missed.
             asyncio.create_task(self.handle_openai_responses(stream_id, openai_ws))
@@ -419,39 +496,19 @@ class HealthAppointmentBot:
 
     def _get_appointment_instructions(self) -> str:
         """Get appointment booking instructions for the bot"""
-        services = "\n".join([f"  - {s['name']} ({s['duration']})" for s in self.services])
-        
-        return f"""
-        You are a helpful hospital appointment booking assistant for {Config.COMPANY_NAME} and you want to be able to schedule an appointment.
-
-        Your goals:
-        1. Greet the user warmly
-        2. Understand their healthcare needs
-        3. Recommend appropriate appointment type
-        4. Collect necessary information
-        5. Confirm appointment details
-
-        Available Services:
-        {services}
-
-        Process:
-        - Ask about their health concern
-        - Categorise concern into whether it requires a general consultation, specialized consultation, or follow-up
-        - Suggest appropriate appointment type
-        - Clarify if appointment is for self or someone else
-        - Collect: full name of caller if appointment is for self else full name of patient, preferred date/time, contact number, medical history
-        - Confirm all details
-        - Thank them for booking
-
-        Be professional, compassionate, and efficient. Always confirm the full appointment details before ending the call."""
+        return build_health_appointment_workflow(
+            Config.COMPANY_NAME,
+            Config.HEALTH_BOT_NAME,
+            self.services,
+        )
 
     def _get_realtime_audio_format(self, session_config: dict, direction: str) -> str:
         """Return the GA Realtime audio format type for input or output."""
         audio_config = session_config.get("audio", {}).get(direction, {})
         format_config = audio_config.get("format", {})
         if isinstance(format_config, dict):
-            return format_config.get("type", "audio/pcmu")
-        return format_config or "audio/pcmu"
+            return format_config.get("type", "audio/pcm")
+        return format_config or "audio/pcm"
 
 
     def _realtime_session_payload(self, session_config: dict) -> dict:
@@ -472,19 +529,51 @@ class HealthAppointmentBot:
             openai_ws = openai_connection["websocket"]
             session_config = openai_connection["session_config"]
             sample_rate = openai_connection["sample_rate"]
+
+            # Build health-bot payload and enforce required GA audio format rates.
+            session_payload = self._realtime_session_payload(session_config)
+            audio_cfg = session_payload.setdefault("audio", {})
+
+            input_cfg = audio_cfg.setdefault("input", {})
+            input_format = input_cfg.get("format", {})
+            if not isinstance(input_format, dict):
+                input_format = {"type": input_format or "audio/pcm"}
+                input_cfg["format"] = input_format
+            input_type = input_format.get("type", "audio/pcm")
+
+            if input_type == "audio/pcm":
+                input_format["rate"] = 24000
+            elif "rate" not in input_format:
+                input_format["rate"] = sample_rate if sample_rate in Config.SUPPORTED_SAMPLE_RATES else 24000
+
+            output_cfg = audio_cfg.setdefault("output", {})
+            output_format = output_cfg.get("format", {})
+            if not isinstance(output_format, dict):
+                output_format = {"type": output_format or "audio/pcm"}
+                output_cfg["format"] = output_format
+            output_type = output_format.get("type", "audio/pcm")
+            if "rate" not in output_format:
+                output_format["rate"] = 24000 if output_type == "audio/pcm" else 8000
             
             # Send GA session configuration
             session_update = {
                 "type": "session.update",
-                "session": self._realtime_session_payload(session_config)
+                "session": session_payload
             }
             
             await openai_ws.send(json.dumps(session_update))
+            input_fmt = input_format.get("type", "audio/pcm")
+            input_rate = input_format.get("rate", "n/a")
+            output_fmt = output_format.get("type", "audio/pcm")
+            output_rate = output_format.get("rate", 24000)
+            voice = output_cfg.get("voice", self.openai_voice)
             logger.info(f"GA OPENAI SESSION CONFIGURED for {stream_id}")
-            logger.info(f"Sample Rate: {sample_rate}Hz")
-            logger.info(f"Input Format: {session_config['input_audio_format']}")
-            logger.info(f"Output Format: {session_config['output_audio_format']}")
-            logger.info(f"Voice: {session_config['voice']}")
+            logger.info(
+                f"Sample Rate: {sample_rate}Hz | "
+                f"Input: {input_fmt}@{input_rate}Hz | "
+                f"Output: {output_fmt}@{output_rate}Hz | "
+                f"Voice: {voice}"
+            )
             
         except Exception as e:
             logger.error(f"Error configuring GA OpenAI session: {e}")
@@ -505,8 +594,10 @@ class HealthAppointmentBot:
                     "role": "user",
                     "content": [{
                         "type": "input_text",
-                        "text": f"A patient just called for appointment booking. The connection is running at {sample_rate}Hz audio quality. \
-                        Please greet them warmly and ask how you can help them today."
+                        "text": (
+                            "Caller said hello. Start the appointment workflow now: "
+                            "greet the caller, list available health services, and ask them to choose one service."
+                        )
                     }]
                 }
             }
@@ -517,8 +608,10 @@ class HealthAppointmentBot:
                 "type": "response.create",
                 "response": {
                     "output_modalities": ["audio"],
-                    "instructions": "Give a warm, professional greeting, asking the user how you can assist them with their appointment booking. \
-                    Keep it concise and natural."
+                    "instructions": (
+                        "Follow the configured health-booking workflow exactly. "
+                        "Start with the greeting and service options only."
+                    )
                 }
             }
             await openai_ws.send(json.dumps(response_msg))
@@ -552,12 +645,30 @@ class HealthAppointmentBot:
                         await self._handle_function_call(stream_id, data)
                     
                     elif event_type == "input_audio_buffer.speech_started":
-                        logger.info(f"Caller started speaking for {stream_id}")
+                        if self.bot_speaking.get(stream_id):
+                            logger.info(f"Ignoring caller speech_started while bot audio is still playing for {stream_id}")
+                        else:
+                            self.caller_speech_started_at[stream_id] = time.time()
+                            self.caller_pending_response[stream_id] = True
+                            logger.info(f"Caller started speaking for {stream_id}")
                     
                     elif event_type == "input_audio_buffer.speech_stopped":
+                        started_at = self.caller_speech_started_at.pop(stream_id, None)
+                        duration_s = time.time() - started_at if started_at else 0
                         logger.info(f"Caller stopped speaking for {stream_id}")
+                        if (
+                            self.caller_pending_response.pop(stream_id, False)
+                            and not self.bot_speaking.get(stream_id)
+                            and duration_s >= 0.25
+                        ):
+                            await self._create_response_for_caller_turn(stream_id)
+                        elif duration_s < 0.25:
+                            logger.info(f"Ignoring very short speech turn for {stream_id}: {duration_s:.2f}s")
                     
                     elif event_type == "response.done":
+                        await self._flush_output_audio(stream_id)
+                        if self.pending_call_end.get(stream_id):
+                            await self._finalize_call_after_response(stream_id)
                         logger.info(f"Bot response completed for {stream_id}")
                     
                     elif event_type == "session.updated":
@@ -568,7 +679,15 @@ class HealthAppointmentBot:
                                 await self.send_initial_greeting(stream_id)
                     
                     elif event_type == "error":
-                        logger.error(f"OpenAI error: {data}")
+                        error = data.get("error", {})
+                        logger.error(
+                            "OpenAI error: type=%s code=%s param=%s message=%s",
+                            error.get("type"),
+                            error.get("code"),
+                            error.get("param"),
+                            error.get("message"),
+                        )
+                        logger.debug(f"OpenAI error payload: {data}")
                     
                 except json.JSONDecodeError as e:
                     logger.error(f"JSON decode error from OpenAI: {e}")
@@ -579,30 +698,243 @@ class HealthAppointmentBot:
             logger.error(f"Error in OpenAI response handler: {e}")
 
 
-    async def _handle_audio_delta (self, stream_id: str, data: dict): # handle_exotel_connected
-        """Handle audio delta from OpenAI"""
+    async def _handle_audio_delta(self, stream_id: str, data: dict):
+        """Handle audio delta from OpenAI and queue it for paced Exotel output."""
         try:
             audio_data = data.get("delta", "")
-            if audio_data:
-                audio_bytes = base64.b64decode(audio_data)
-                logger.info(f"AUDIO DELTA RECEIVED: {len(audio_bytes)} bytes")
-                
-                # Send to Exotel
-                if stream_id in self.exotel_connections:
-                    exotel_ws = self.exotel_connections[stream_id]["websocket"]
-                    
-                    media_msg = {
-                        "event": "media",
-                        "streamSid": stream_id,
-                        "media": {
-                            "payload": base64.b64encode(audio_bytes).decode('utf-8')
-                        }
-                    }
-                    await exotel_ws.send(json.dumps(media_msg))
-                    logger.info(f"SENT AUDIO TO EXOTEL: {len(audio_bytes)} bytes")
-                    
+            if not audio_data:
+                return
+
+            pcm16_bytes = base64.b64decode(audio_data)
+            logger.info(f"AUDIO DELTA RECEIVED: {len(pcm16_bytes)} bytes (PCM16 24kHz)")
+
+            # Convert PCM16 24kHz to the Exotel call sample rate before sending.
+            sample_rate = self.connection_sample_rates.get(stream_id, 8000)
+            exotel_pcm = self._resample_pcm16(
+                pcm16_bytes,
+                24000,
+                sample_rate,
+                state_key=(stream_id, "output"),
+            )
+            if not exotel_pcm:
+                return
+
+            if stream_id in self.exotel_connections:
+                queue = self._ensure_output_audio_sender(stream_id)
+                self.bot_speaking[stream_id] = True
+                await queue.put(exotel_pcm)
+                logger.debug(
+                    "QUEUED AUDIO FOR EXOTEL: %s bytes (PCM16 %sHz); queue depth=%s",
+                    len(exotel_pcm),
+                    sample_rate,
+                    queue.qsize(),
+                )
+
         except Exception as e:
             logger.error(f"Error handling audio delta: {e}")
+
+    async def _flush_output_audio(self, stream_id: str):
+        """Flush any partial outbound audio frame at a real response boundary."""
+        if stream_id not in self.exotel_connections:
+            return
+
+        queue = self._ensure_output_audio_sender(stream_id)
+        await queue.put(None)
+
+    async def _finalize_call_after_response(self, stream_id: str):
+        """End the call after all queued outbound audio has been delivered."""
+        if not self.pending_call_end.pop(stream_id, None):
+            return
+
+        try:
+            queue = self.output_audio_queues.get(stream_id)
+            if queue is not None:
+                await queue.join()
+
+            exotel_conn = self.exotel_connections.get(stream_id)
+            if exotel_conn:
+                exotel_ws = exotel_conn.get("websocket")
+                if exotel_ws and not getattr(exotel_ws, "closed", False):
+                    await exotel_ws.close()
+
+            await self.cleanup_connections(stream_id)
+            logger.info(f"Call terminated for {stream_id}")
+        except Exception as e:
+            logger.error(f"Error terminating call for {stream_id}: {e}")
+
+    async def _create_response_for_caller_turn(self, stream_id: str):
+        """Ask OpenAI to answer the latest committed caller turn."""
+        if stream_id not in self.openai_connections:
+            return
+
+        try:
+            openai_ws = self.openai_connections[stream_id]["websocket"]
+            response_msg = {
+                "type": "response.create",
+                "response": {
+                    "output_modalities": ["audio"],
+                    "instructions": (
+                        "Continue the health-booking workflow from the current step. "
+                        "Ask exactly one next question, keep it concise, and do not repeat completed steps "
+                        "unless the caller asked to alter details."
+                    )
+                }
+            }
+            await openai_ws.send(json.dumps(response_msg))
+            logger.info(f"Created response for caller turn: {stream_id}")
+        except Exception as e:
+            logger.error(f"Error creating caller response: {e}")
+
+    def _ensure_output_audio_sender(self, stream_id: str) -> asyncio.Queue:
+        """Ensure one non-blocking paced sender exists for outbound audio."""
+        queue = self.output_audio_queues.get(stream_id)
+        task = self.output_audio_tasks.get(stream_id)
+        if queue is None:
+            queue = asyncio.Queue()
+            self.output_audio_queues[stream_id] = queue
+        if task is None or task.done():
+            self.output_audio_tasks[stream_id] = asyncio.create_task(
+                self._run_output_audio_sender(stream_id, queue)
+            )
+        return queue
+
+    async def _run_output_audio_sender(self, stream_id: str, queue: asyncio.Queue):
+        """Send queued PCM16 audio to Exotel in 20ms frames without blocking OpenAI reads."""
+        try:
+            while True:
+                item = await queue.get()
+                try:
+                    if item is None:
+                        await self._send_buffered_audio_frames(stream_id, pad_final=True)
+                        self.bot_speaking[stream_id] = False
+                        logger.info(f"Outbound bot audio drained for {stream_id}")
+                    else:
+                        self.output_audio_buffers[stream_id] = (
+                            self.output_audio_buffers.get(stream_id, b"") + item
+                        )
+                        await self._send_buffered_audio_frames(stream_id, pad_final=False)
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            raise
+        except websockets.exceptions.ConnectionClosed:
+            logger.warning(f"Exotel connection closed for {stream_id}, stopping audio sender")
+        except Exception as e:
+            logger.error(f"Error in outbound audio sender for {stream_id}: {e}")
+
+    async def _send_buffered_audio_frames(self, stream_id: str, pad_final: bool):
+        pending_audio = self.output_audio_buffers.get(stream_id, b"")
+        if not pending_audio or stream_id not in self.exotel_connections:
+            return
+
+        frames_sent, frame_size, remainder = await self._send_pcm_audio_to_exotel(
+            stream_id,
+            pending_audio,
+            pad_final=pad_final,
+        )
+        self.output_audio_buffers[stream_id] = remainder
+        sample_rate = self.connection_sample_rates.get(stream_id, 8000)
+        sent_bytes = len(pending_audio) - len(remainder)
+        if frames_sent:
+            logger.info(
+                "SENT AUDIO TO EXOTEL: %s bytes (PCM16 %sHz) as %s frames x %s bytes; %s buffered",
+                sent_bytes,
+                sample_rate,
+                frames_sent,
+                frame_size,
+                len(remainder),
+            )
+
+    async def _send_pcm_audio_to_exotel(
+        self,
+        stream_id: str,
+        pcm_bytes: bytes,
+        pad_final: bool = False,
+    ) -> Tuple[int, int, bytes]:
+        """Send PCM16 audio to Exotel in 20ms paced frames to avoid accelerated playback."""
+        exotel_ws = self.exotel_connections[stream_id]["websocket"]
+        sample_rate = self.connection_sample_rates.get(stream_id, 8000)
+        frame_size = max(2, int(sample_rate * self.exotel_output_frame_ms / 1000) * 2)
+        frame_delay_s = self.exotel_output_frame_ms / 1000.0
+        full_frame_bytes = (len(pcm_bytes) // frame_size) * frame_size
+        remainder = pcm_bytes[full_frame_bytes:]
+
+        frames_sent = 0
+        for offset in range(0, full_frame_bytes, frame_size):
+            frame = pcm_bytes[offset: offset + frame_size]
+
+            media_msg = {
+                "event": "media",
+                "streamSid": stream_id,
+                "stream_sid": stream_id,
+                "media": {
+                    "payload": base64.b64encode(frame).decode('utf-8')
+                }
+            }
+            await exotel_ws.send(json.dumps(media_msg))
+            frames_sent += 1
+
+            if offset + frame_size < full_frame_bytes:
+                await asyncio.sleep(frame_delay_s)
+
+        if pad_final and remainder:
+            frame = remainder + b"\x00" * (frame_size - len(remainder))
+            media_msg = {
+                "event": "media",
+                "streamSid": stream_id,
+                "stream_sid": stream_id,
+                "media": {
+                    "payload": base64.b64encode(frame).decode('utf-8')
+                }
+            }
+            if frames_sent:
+                await asyncio.sleep(frame_delay_s)
+            await exotel_ws.send(json.dumps(media_msg))
+            frames_sent += 1
+            remainder = b""
+
+        return frames_sent, frame_size, remainder
+
+    def _resample_pcm16(
+        self,
+        pcm16_bytes: bytes,
+        source_rate: int,
+        target_rate: int,
+        state_key: Optional[Tuple[str, str]] = None,
+    ) -> bytes:
+        """Resample mono PCM16 audio between call and OpenAI sample rates."""
+        if not pcm16_bytes:
+            return b''
+        if source_rate == target_rate:
+            return pcm16_bytes
+
+        # Prefer audioop for robust telephony-grade downsampling.
+        try:
+            import audioop
+            state_lookup_key = None
+            state = None
+            if state_key:
+                state_lookup_key = (state_key[0], state_key[1], source_rate, target_rate)
+                state = self.resample_states.get(state_lookup_key)
+
+            pcm_bytes, state = audioop.ratecv(pcm16_bytes, 2, 1, source_rate, target_rate, state)
+            if state_lookup_key:
+                self.resample_states[state_lookup_key] = state
+            return pcm_bytes
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"audioop conversion failed, using numpy fallback: {e}")
+
+        samples = np.frombuffer(pcm16_bytes, dtype=np.int16)
+
+        # Fallback resample with linear interpolation.
+        target_length = int(len(samples) * target_rate / source_rate)
+        if target_length <= 0:
+            return b''
+        source_positions = np.linspace(0, len(samples) - 1, target_length)
+        resampled = np.interp(source_positions, np.arange(len(samples)), samples).astype(np.int16)
+        return resampled.tobytes()
 
 
     async def _handle_function_call(self, stream_id: str, data: dict):
@@ -611,28 +943,89 @@ class HealthAppointmentBot:
             call_id = data.get("call_id")
             function_name = data.get("name", "")
             arguments_str = data.get("arguments", "{}")
+            args = json.loads(arguments_str)
             
             logger.info(f"Function call: {function_name}")
             
             if function_name == "book_appointment":
-                args = json.loads(arguments_str)
-                result = await self.book_appointment(args)
-                
-                # Send result back
-                if stream_id in self.openai_connections:
-                    openai_ws = self.openai_connections[stream_id]["websocket"]
-                    
-                    result_msg = {
-                        "type": "conversation.item.create",
-                        "item": {
-                            "type": "function_call_result",
-                            "call_id": call_id,
-                            "result": json.dumps(result)
-                        }
+                missing_fields = self._missing_required_appointment_fields(args)
+                appointment_type = args.get("appointment_type", "")
+
+                if missing_fields:
+                    self.booking_ready_to_confirm[stream_id] = False
+                    result = {
+                        "status": "error",
+                        "error": "missing_required_fields",
+                        "missing_fields": missing_fields,
+                        "message": (
+                            "Cannot book appointment until all required details are explicitly collected "
+                            "from the caller."
+                        ),
                     }
-                    await openai_ws.send(json.dumps(result_msg))
-                    
-                    logger.info(f"Appointment booking processed")
+                elif not self._is_valid_health_service(appointment_type):
+                    self.booking_ready_to_confirm[stream_id] = False
+                    result = {
+                        "status": "error",
+                        "error": "invalid_appointment_type",
+                        "message": "Selected service is not a valid health service option.",
+                    }
+                else:
+                    result = await self.book_appointment(args)
+                    self.booking_ready_to_confirm[stream_id] = True
+            elif function_name == "end_call":
+                result = await self.end_call(stream_id, args)
+            else:
+                result = {
+                    "status": "error",
+                    "message": f"Unknown function: {function_name}"
+                }
+                
+            if stream_id in self.openai_connections:
+                openai_ws = self.openai_connections[stream_id]["websocket"]
+
+                result_msg = {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(result)
+                    }
+                }
+                await openai_ws.send(json.dumps(result_msg))
+
+                follow_up_instruction = (
+                    "Use the function result and continue the workflow naturally in one concise reply."
+                )
+                if function_name == "book_appointment" and result.get("status") == "error":
+                    missing = result.get("missing_fields", [])
+                    if missing:
+                        missing_text = ", ".join(missing)
+                        follow_up_instruction = (
+                            f"Booking was rejected because required details are missing: {missing_text}. "
+                            "Ask for only the next missing detail from the caller, repeat it back, "
+                            "and continue until all required details are captured."
+                        )
+                    else:
+                        follow_up_instruction = (
+                            "Booking was rejected because the selected service is invalid. "
+                            "Ask the caller to choose one valid service option."
+                        )
+                if function_name == "end_call":
+                    follow_up_instruction = (
+                        "Give a short polite closing line if not already spoken. "
+                        "Do not ask any follow-up questions."
+                    )
+
+                response_msg = {
+                    "type": "response.create",
+                    "response": {
+                        "output_modalities": ["audio"],
+                        "instructions": follow_up_instruction,
+                    },
+                }
+                await openai_ws.send(json.dumps(response_msg))
+
+                logger.info(f"Processed function call: {function_name}")
                     
         except Exception as e:
             logger.error(f"Error handling function call: {e}")
@@ -652,6 +1045,31 @@ class HealthAppointmentBot:
             "time": args.get('preferred_time'),
             "contact": args.get('contact_phone'),
             "booking_time": time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+
+
+    async def end_call(self, stream_id: str, args: dict) -> dict:
+        """Mark a call for clean termination after final audio is sent."""
+        reason = args.get("reason", "unspecified")
+
+        if reason == "appointment_confirmed" and not self.booking_ready_to_confirm.get(stream_id, False):
+            return {
+                "status": "error",
+                "error": "booking_not_ready",
+                "message": (
+                    "Cannot end call as appointment confirmed before collecting all required details "
+                    "and successfully booking."
+                ),
+            }
+
+        self.pending_call_end[stream_id] = True
+        self.booking_ready_to_confirm[stream_id] = False
+        logger.info(f"Call end requested for {stream_id}: {reason}")
+        return {
+            "status": "success",
+            "message": "Call scheduled to end",
+            "reason": reason,
+            "ended_at": time.strftime('%Y-%m-%d %H:%M:%S')
         }
 
 
@@ -691,6 +1109,34 @@ class HealthAppointmentBot:
             if stream_id in self.audio_buffers:
                 del self.audio_buffers[stream_id]
                 logger.info(f"Cleared audio buffer for {stream_id}")
+
+            if stream_id in self.output_audio_buffers:
+                del self.output_audio_buffers[stream_id]
+                logger.info(f"Cleared output audio buffer for {stream_id}")
+
+            if stream_id in self.output_audio_queues:
+                del self.output_audio_queues[stream_id]
+                logger.info(f"Cleared output audio queue for {stream_id}")
+
+            if stream_id in self.output_audio_tasks:
+                task = self.output_audio_tasks.pop(stream_id)
+                task.cancel()
+                logger.info(f"Cancelled output audio sender for {stream_id}")
+
+            self.bot_speaking.pop(stream_id, None)
+            self.caller_speech_started_at.pop(stream_id, None)
+            self.caller_pending_response.pop(stream_id, None)
+            self.pending_call_end.pop(stream_id, None)
+            self.booking_ready_to_confirm.pop(stream_id, None)
+
+            stale_resample_keys = [
+                key for key in self.resample_states
+                if key[0] == stream_id
+            ]
+            for key in stale_resample_keys:
+                del self.resample_states[key]
+            if stale_resample_keys:
+                logger.info(f"Cleared resampler state for {stream_id}")
             
             if stream_id in self.connection_sample_rates:
                 del self.connection_sample_rates[stream_id]
