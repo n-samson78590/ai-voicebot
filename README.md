@@ -245,7 +245,7 @@ For healthcare bot:
 2. Utilise above to expand into reschuduling and cancellations.
 3. Test and improve prompt based on user interactions.
 
-# To note
+# Note
 The temperature parameter has been removed from the API calls. 
 
 ## License
