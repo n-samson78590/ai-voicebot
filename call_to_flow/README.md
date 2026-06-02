@@ -14,12 +14,12 @@ It supports:
 
 ```text
 Streamlit UI
-  -> backend FastAPI API
+  -> Backend FastAPI
   -> Exotel Connect-to-Flow API
   -> Voicebot or IVR applet
 ```
 
-The Streamlit page stays thin. For voicebot calls, the backend first starts the local `main.py --health-bot` process if needed, then calls Exotel. For IVR calls, it directly calls Exotel.
+The Streamlit page stays thin. For voicebot calls, the backend first starts the local `main.py --health-bot` process if needed, then connects to the voicebot app flow. For IVR calls, it directly connects to the IVR app flow.
 
 ## Voicebot POC Caveat
 
@@ -36,11 +36,9 @@ This app does not automate the Exotel dashboard update step.
 ## Setup
 
 ```powershell
-cd C:\Users\NaomiSamson\ai-voicebot\call_to_flow
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+cd .\call_to_flow\
 pip install -r backend\requirements.txt
-Copy-Item .env.example .env
+cp .env.example .env
 ```
 
 Fill in `.env` inside the `call_to_flow` directory. The root project `.env` still needs the voicebot values such as `OPENAI_API_KEY` and `COMPANY_NAME`.
@@ -75,7 +73,7 @@ uvicorn app:app --reload --port 8000
 Then start the frontend rendered with Streamlit:
 
 ```powershell
-cd C:\Users\NaomiSamson\ai-voicebot\call_to_flow
+cd .\call_to_flow\
 streamlit run streamlit_app.py
 ```
 

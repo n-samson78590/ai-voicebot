@@ -101,7 +101,7 @@ def render_call_form() -> None:
         key="phone_number",
         value=st.session_state.get("phone_number", "+91"),
         placeholder="+919876543210",
-        help="Enter a 10-digit Indian mobile number..",
+        help="Enter a 10-digit Indian mobile number.",
         on_change=lambda: st.session_state.__setitem__(
             "phone_number", normalize_phone_value(st.session_state.get("phone_number", "+91"))
         ),
