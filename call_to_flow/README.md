@@ -101,5 +101,3 @@ This currently acknowledges callbacks and gives you the extension point for CRM 
 
 - The voicebot applet URL still has to be changed manually when ngrok changes.
 - If the voicebot is already running outside this backend, the backend can still detect readiness through the configured port or health URL.
-- Persist call attempts and callbacks before using this for production workflows.
-- Add authentication before exposing the console beyond a local or internal demo.
