@@ -1,6 +1,6 @@
-# Voice AI Bot System
+# LLM Voicebot setup
 
-A production-ready, conversational AI voice bot for appointment booking that bridges **Exotel's WebSocket streaming** with **OpenAI's Realtime API** for natural, speech-to-speech conversations over phone calls. 
+A conversational AI voice bot for appointment booking that bridges **Exotel's WebSocket streaming** with **OpenAI's Realtime API** for natural, speech-to-speech conversations over phone calls. 
 
 ## What This Bot Does
 
@@ -16,7 +16,7 @@ A production-ready, conversational AI voice bot for appointment booking that bri
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.9+
 - OpenAI API key with Realtime API access
 - Exotel account with Voicebot Applet access
 
@@ -59,7 +59,7 @@ SERVER_PORT=5000
 
 # BOT PERSONALITY
 COMPANY_NAME=Your Company Name
-SALES_BOT_NAME=Sarah
+SALES_BOT_NAME=Your Bot Name
 
 # AUDIO SETTINGS
 SAMPLE_RATE=24000
@@ -117,11 +117,21 @@ The bot will start a WebSocket server on `0.0.0.0:5000`.
 ├── services_config.py              # Routing for services/product information for different bot types
 ├── core/                           # Core bot logic and framework
 │   ├── __init__.py
-│   ├── bot_framework.py
-│   ├── bot_launcher.py
 │   ├── sales_bot.py 
 │   └── health_appointment_bot.py   # Healthcare appointment booking bot logic
 │   └── health_prompt_workflow.py   # Optimised prompt workflow for healthcare bot
+├── call_to_flow/                   # Exotel Connect-to-Flow integration
+│   ├── backend/                    # FastAPI backend for handling Exotel requests
+│   │   ├── __init__.py
+│   │   ├── app.py                  # FastAPI application
+│   │   ├── models.py               # Pydantic models for API requests/responses
+│   │   └── services/               # Services for handling business logic
+│   │       ├── __init__.py
+│   │       └── exotel_service.py   # Exotel integration service
+│   │       └── voicebot_service.py # Exotel integration service
+│   ├── .env.example                # Example environment variables for the Exotel connect to flow integration
+│   ├── streamlit_app.py                      # Streamlit UI to connect to Exotel and monitor status
+│   ├── README.md                   # Documentation for Exotel connect to flow integration
 ├── engines/                        # AI engine components (STT, TTS, NLP, etc.)
 │   ├── __init__.py
 │   ├── audio_enhancer.py
@@ -131,7 +141,7 @@ The bot will start a WebSocket server on `0.0.0.0:5000`.
 │   └── tts_engine.py
 ├── legacy/ 
 │   └── sales_bot_legacy.py         # Legacy sales bot code using deprecated Realtime Beta API (for reference)
-├── env.example                     # Example environment variables
+├── env.example                     # Example environment variables for the LLM voicebot
 ├── main.py                         # Main entry point for the application
 ├── requirements.txt                # Python dependencies
 └── venv/                           # Python virtual environment
@@ -231,14 +241,6 @@ grep "CONVERSATION COMPLETED" logs/bot.log
 grep "ERROR" logs/bot.log
 ```
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
 # Next steps
 For healthcare bot:
 1. Integrate calendar APIs for realtime appointment scheduling.
@@ -246,7 +248,9 @@ For healthcare bot:
 3. Test and improve prompt based on user interactions.
 
 # To note
-The temperature parameter has been removed from the API calls. 
+The voicebot can be run manually utilising the main.py entry point, but the ./call_to_flow/. services may be utilised as well. Neither of these services automate the Exotel applet configuration, which is a required step to connect the bot to Exotel's telephony services.
+
+For reference on connecting using the Exotel Connect-to-Flow API, refer to ./call_to_flow/README.md.
 
 ## License
 

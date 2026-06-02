@@ -1,0 +1,5 @@
+fastapi==0.124.4
+uvicorn[standard]==0.38.0
+requests==2.34.2
+python-dotenv==1.2.2
+streamlit==1.48.1
