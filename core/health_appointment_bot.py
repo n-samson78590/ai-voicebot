@@ -49,6 +49,8 @@ class HealthAppointmentBot:
         self.output_audio_buffers: Dict[str, bytes] = {}
         self.output_audio_queues: Dict[str, asyncio.Queue] = {}
         self.output_audio_tasks: Dict[str, asyncio.Task] = {}
+        self.output_audio_next_send_at: Dict[str, float] = {}
+        self.output_audio_last_samples: Dict[str, int] = {}
         self.resample_states: Dict[Tuple[str, str, int, int], Any] = {}
         self.connection_sample_rates: Dict[str, int] = {}
         self.connection_chunk_sizes: Dict[str, int] = {}
@@ -718,6 +720,7 @@ class HealthAppointmentBot:
             )
             if not exotel_pcm:
                 return
+            exotel_pcm = self._condition_outbound_pcm16(stream_id, exotel_pcm, sample_rate)
 
             if stream_id in self.exotel_connections:
                 queue = self._ensure_output_audio_sender(stream_id)
@@ -806,6 +809,8 @@ class HealthAppointmentBot:
                 try:
                     if item is None:
                         await self._send_buffered_audio_frames(stream_id, pad_final=True)
+                        self.output_audio_next_send_at.pop(stream_id, None)
+                        self.output_audio_last_samples.pop(stream_id, None)
                         self.bot_speaking[stream_id] = False
                         logger.info(f"Outbound bot audio drained for {stream_id}")
                     else:
@@ -851,18 +856,26 @@ class HealthAppointmentBot:
         pcm_bytes: bytes,
         pad_final: bool = False,
     ) -> Tuple[int, int, bytes]:
-        """Send PCM16 audio to Exotel in 20ms paced frames to avoid accelerated playback."""
+        """Send PCM16 audio to Exotel in 20ms paced frames to avoid jittery playback."""
         exotel_ws = self.exotel_connections[stream_id]["websocket"]
         sample_rate = self.connection_sample_rates.get(stream_id, 8000)
         frame_size = max(2, int(sample_rate * self.exotel_output_frame_ms / 1000) * 2)
         frame_delay_s = self.exotel_output_frame_ms / 1000.0
         full_frame_bytes = (len(pcm_bytes) // frame_size) * frame_size
         remainder = pcm_bytes[full_frame_bytes:]
+        loop = asyncio.get_running_loop()
+        next_send_at = self.output_audio_next_send_at.get(stream_id, loop.time())
 
         frames_sent = 0
         for offset in range(0, full_frame_bytes, frame_size):
             frame = pcm_bytes[offset: offset + frame_size]
 
+            now = loop.time()
+            if next_send_at > now:
+                await asyncio.sleep(next_send_at - now)
+            elif now - next_send_at > frame_delay_s:
+                next_send_at = now
+
             media_msg = {
                 "event": "media",
                 "streamSid": stream_id,
@@ -873,12 +886,16 @@ class HealthAppointmentBot:
             }
             await exotel_ws.send(json.dumps(media_msg))
             frames_sent += 1
-
-            if offset + frame_size < full_frame_bytes:
-                await asyncio.sleep(frame_delay_s)
+            next_send_at += frame_delay_s
 
         if pad_final and remainder:
             frame = remainder + b"\x00" * (frame_size - len(remainder))
+            now = loop.time()
+            if next_send_at > now:
+                await asyncio.sleep(next_send_at - now)
+            elif now - next_send_at > frame_delay_s:
+                next_send_at = now
+
             media_msg = {
                 "event": "media",
                 "streamSid": stream_id,
@@ -887,13 +904,44 @@ class HealthAppointmentBot:
                     "payload": base64.b64encode(frame).decode('utf-8')
                 }
             }
-            if frames_sent:
-                await asyncio.sleep(frame_delay_s)
             await exotel_ws.send(json.dumps(media_msg))
             frames_sent += 1
+            next_send_at += frame_delay_s
             remainder = b""
 
+        if frames_sent:
+            self.output_audio_next_send_at[stream_id] = next_send_at
+
         return frames_sent, frame_size, remainder
+
+    def _condition_outbound_pcm16(self, stream_id: str, pcm16_bytes: bytes, sample_rate: int) -> bytes:
+        """Apply light de-clicking and peak control to outbound bot speech."""
+        if len(pcm16_bytes) < 2:
+            return pcm16_bytes
+
+        try:
+            even_length = len(pcm16_bytes) - (len(pcm16_bytes) % 2)
+            samples = np.frombuffer(pcm16_bytes[:even_length], dtype=np.int16).astype(np.float32)
+            if samples.size == 0:
+                return pcm16_bytes
+
+            previous_sample = self.output_audio_last_samples.get(stream_id)
+            if previous_sample is not None:
+                correction = float(previous_sample) - samples[0]
+                if abs(correction) > 1000:
+                    ramp_samples = min(samples.size, max(1, int(sample_rate * 0.003)))
+                    samples[:ramp_samples] += np.linspace(correction, 0.0, ramp_samples, endpoint=False)
+
+            peak = float(np.max(np.abs(samples)))
+            if peak > 30000:
+                samples *= 30000.0 / peak
+
+            conditioned = np.clip(samples, -32768, 32767).astype(np.int16)
+            self.output_audio_last_samples[stream_id] = int(conditioned[-1])
+            return conditioned.tobytes() + pcm16_bytes[even_length:]
+        except Exception as e:
+            logger.debug(f"Outbound audio conditioning skipped for {stream_id}: {e}")
+            return pcm16_bytes
 
     def _resample_pcm16(
         self,
@@ -1122,6 +1170,9 @@ class HealthAppointmentBot:
                 task = self.output_audio_tasks.pop(stream_id)
                 task.cancel()
                 logger.info(f"Cancelled output audio sender for {stream_id}")
+
+            self.output_audio_next_send_at.pop(stream_id, None)
+            self.output_audio_last_samples.pop(stream_id, None)
 
             self.bot_speaking.pop(stream_id, None)
             self.caller_speech_started_at.pop(stream_id, None)
