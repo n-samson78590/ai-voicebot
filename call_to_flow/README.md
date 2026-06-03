@@ -68,7 +68,7 @@ Start the backend first:
 
 ```powershell
 cd .\ai-voicebot\call_to_flow\backend
-uvicorn app:app --reload --port 8000
+uvicorn app:app --reload --port 5000
 ```
 
 Then start the frontend rendered with Streamlit:

@@ -1,11 +1,19 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
+
 
 from config import settings
 from models import CallRequest, CallResponse, VoicebotStatus
 from services.exotel_service import ExotelConfigError, exotel_service
 from services.voicebot_service import voicebot_service
+import logging
 
+logging.basicConfig(
+    filename="ivr.log",
+    level=logging.INFO,
+    format="%(asctime)s | %(message)s"
+)
 
 app = FastAPI(
     title="Exotel Call Flow Console",
@@ -84,6 +92,19 @@ def start_ivr_call(call_request: CallRequest) -> CallResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    
+
+@app.get("/api/ivr/log")
+async def log_digit(request: Request):
+
+    digit = request.query_params.get("digit")
+    call_sid = request.query_params.get("CallSid")
+
+    logging.info(
+        f"CallSid={call_sid} | Digit={digit}"
+    )
+
+    return PlainTextResponse("OK")
 
 
 @app.post("/api/webhooks/exotel/status")
@@ -91,3 +112,13 @@ async def exotel_status_webhook(request: Request) -> dict:
     form = await request.form()
     # Placeholder for CRM sync, call timeline persistence, and analytics.
     return {"received": True, "fields": dict(form)}
+
+# @app.get("/debug/routes")
+# async def debug_routes():
+#     return [
+#         {
+#             "path": route.path,
+#             "name": route.name
+#         }
+#         for route in app.routes
+#     ]

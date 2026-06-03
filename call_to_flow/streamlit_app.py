@@ -8,7 +8,7 @@ import requests
 import streamlit as st
 
 
-DEFAULT_API_BASE = os.getenv("CALL_TO_FLOW_API_BASE", "http://localhost:8000").rstrip("/")
+DEFAULT_API_BASE = os.getenv("CALL_TO_FLOW_API_BASE", "http://localhost:5000").rstrip("/")
 INDIA_PHONE_RE = re.compile(r"^\+91\d{10}$")
 
 
