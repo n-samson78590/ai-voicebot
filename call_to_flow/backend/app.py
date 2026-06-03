@@ -1,11 +1,19 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
+
 
 from config import settings
 from models import CallRequest, CallResponse, VoicebotStatus
 from services.exotel_service import ExotelConfigError, exotel_service
 from services.voicebot_service import voicebot_service
+import logging
+from datetime import datetime
+from pathlib import Path
+from datetime import datetime
 
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(
     title="Exotel Call Flow Console",
@@ -84,6 +92,34 @@ def start_ivr_call(call_request: CallRequest) -> CallResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    
+
+@app.get("/api/ivr/log")
+async def log_digit(request: Request):
+
+    call_sid = request.query_params.get("CallSid")
+    digit = request.query_params.get("digit")
+    level = request.query_params.get("level")
+
+    if not call_sid:
+        return PlainTextResponse(
+            "Missing CallSid",
+            status_code=400
+        )
+
+    log_file = LOG_DIR / f"{call_sid}.log"
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(
+            f"{call_sid} | "
+            f"{timestamp} | "
+            f"Level={level} | "
+            f"Digit={digit}\n"
+        )
+
+    return PlainTextResponse("OK")
 
 
 @app.post("/api/webhooks/exotel/status")
