@@ -1,7 +1,8 @@
 # Exotel Call Flow Console
 
-Streamlit dashboard for triggering Exotel Connect-to-Flow calls without opening the Exotel dashboard.
-[Documentation: Exotel Connect-to-Flow API: https://developer.exotel.com/api/#connect-to-flow]
+Streamlit dashboard for triggering Exotel Connect-to-Flow calls without opening the Exotel dashboard. 
+
+Refer: Exotel Connect-to-Flow API: https://developer.exotel.com/api/#connect-to-flow
 
 It supports:
 
@@ -26,12 +27,12 @@ The Streamlit page stays thin. For voicebot calls, the backend first starts the 
 The Exotel Voicebot Applet still needs a public WebSocket URL configured in the Exotel dashboard. For a local setup, that usually means:
 
 1. Start ngrok for the local voicebot WebSocket server.
-2. Copy the public `wss://.../ws` URL.
-3. Manually update the Exotel Voicebot Applet configuration.
+2. Copy the public `wss://.../ws` URL. Update URL with stream rate parameter.
+3. Manually update the Exotel Voicebot Applet configuration inside Exotel dashboard.
 4. Save and publish the flow.
 5. Use the Streamlit console to start the service and place calls.
 
-This app does not automate the Exotel dashboard update step.
+This app **does not automate** the Exotel dashboard update step
 
 ## Setup
 
@@ -52,7 +53,7 @@ EXOTEL_API_TOKEN=
 EXOTEL_CALLER_ID=
 VOICEBOT_APP_ID=
 IVR_APP_ID=
-VOICEBOT_START_COMMAND=python main.py --health-bot
+VOICEBOT_START_COMMAND=python main.py --health-bot 
 ```
 
 You can also set `VOICEBOT_FLOW_URL` and `IVR_FLOW_URL` explicitly. If they are blank, the backend builds:
