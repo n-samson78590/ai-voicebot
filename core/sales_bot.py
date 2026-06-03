@@ -43,6 +43,7 @@ class SalesBot:
         
         # Enhanced audio buffering with dynamic sample rate support
         self.audio_buffers: Dict[str, bytes] = {}
+        self.resample_states: Dict[Tuple[str, str, int, int], Any] = {}
         self.connection_sample_rates: Dict[str, int] = {}  # Track sample rate per connection
         self.connection_chunk_sizes: Dict[str, int] = {}   # Track chunk size per connection
         
@@ -370,12 +371,17 @@ class SalesBot:
         try:
             # Get OpenAI connection config
             openai_config = self.openai_connections[stream_id]
-            input_format = openai_config.get("input_format", "raw/slin")
+            input_format = openai_config.get("input_format", "audio/pcm")
             
             # Convert audio based on sample rate and format
-            if input_format in ("pcm16", "audio/pcm") and sample_rate >= 16000:
-                # High quality PCM for 16kHz+ 
-                openai_audio = chunk  # Already PCM16
+            if input_format in ("pcm16", "audio/pcm"):
+                # Realtime PCM input is configured at 24kHz; resample Exotel PCM16 into that rate.
+                openai_audio = self._resample_pcm16(
+                    chunk,
+                    sample_rate,
+                    24000,
+                    state_key=(stream_id, "input"),
+                )
             else:
                 # Convert to G.711 u-law for lower sample rates or telephony compatibility
                 openai_audio = self.convert_pcm_to_ulaw(chunk)
@@ -722,13 +728,7 @@ If the caller asks for a specialist or has complex requirements, offer to transf
                 "type": "response.create",
                 "response": {
                     "output_modalities": ["audio"],
-                    "instructions": "Respond naturally and conversationally. Use appropriate pauses and inflections.",
-                    "audio": {
-                        "output": {
-                            "format": {"type": "audio/pcmu"},
-                            "voice": self.openai_voice
-                        }
-                    }
+                    "instructions": "Respond naturally and conversationally. Use appropriate pauses and inflections."
                 }
             }
             await openai_ws.send(json.dumps(response_create))
@@ -751,22 +751,23 @@ If the caller asks for a specialist or has complex requirements, offer to transf
             
             # Get connection settings
             sample_rate = self.connection_sample_rates.get(stream_id, self.default_sample_rate)
-            output_format = self.openai_connections[stream_id].get("output_format", "raw/slin")
+            output_format = self.openai_connections[stream_id].get("output_format", "audio/pcm")
             
             # Decode audio based on format
             openai_audio = base64.b64decode(audio_delta)
             
             # Convert audio for Exotel based on sample rate and format
-            if output_format in ("pcm16", "audio/pcm") and sample_rate >= 16000:
-                # High quality PCM output - convert to PCM for Exotel
-                exotel_pcm = openai_audio
+            if output_format in ("pcm16", "audio/pcm"):
+                # OpenAI Realtime PCM output is 24kHz; resample to the Exotel call rate.
+                exotel_pcm = self._resample_pcm16(
+                    openai_audio,
+                    24000,
+                    sample_rate,
+                    state_key=(stream_id, "output"),
+                )
             else:
                 # G.711 u-law output - convert to PCM for Exotel
                 exotel_pcm = self.convert_ulaw_to_pcm(openai_audio)
-            
-            # Apply resampling if needed for different sample rates
-            if sample_rate != self.default_sample_rate:
-                exotel_pcm = self._resample_audio(exotel_pcm, self.default_sample_rate, sample_rate)
             
             exotel_audio_b64 = base64.b64encode(exotel_pcm).decode()
             
@@ -946,6 +947,39 @@ If the caller asks for a specialist or has complex requirements, offer to transf
             logger.error(f"Error resampling audio: {e}")
             return audio_data
 
+    def _resample_pcm16(
+        self,
+        pcm16_bytes: bytes,
+        source_rate: int,
+        target_rate: int,
+        state_key: Optional[Tuple[str, str]] = None,
+    ) -> bytes:
+        """Resample mono PCM16 audio while preserving state across realtime chunks."""
+        if not pcm16_bytes:
+            return b""
+        if source_rate == target_rate:
+            return pcm16_bytes
+
+        try:
+            import audioop
+
+            state_lookup_key = None
+            state = None
+            if state_key:
+                state_lookup_key = (state_key[0], state_key[1], source_rate, target_rate)
+                state = self.resample_states.get(state_lookup_key)
+
+            resampled, state = audioop.ratecv(pcm16_bytes, 2, 1, source_rate, target_rate, state)
+            if state_lookup_key:
+                self.resample_states[state_lookup_key] = state
+            return resampled
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"audioop resampling failed, using MediaResampler fallback: {e}")
+
+        return self._resample_audio(pcm16_bytes, source_rate, target_rate)
+
     def apply_noise_suppression(self, audio_data: bytes, sample_rate: int) -> bytes:
         """Enhanced noise suppression with sample rate awareness"""
         if not Config.AUDIO_ENHANCEMENT_ENABLED:
@@ -1017,6 +1051,14 @@ If the caller asks for a specialist or has complex requirements, offer to transf
 
     def convert_pcm_to_ulaw(self, pcm_data: bytes) -> bytes:
         """Convert 16-bit PCM to G.711 u-law (same sample rate)"""
+        try:
+            import audioop
+            return audioop.lin2ulaw(pcm_data, 2)
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"audioop PCM to u-law conversion failed, using fallback: {e}")
+
         # G.711 u-law encoding table (simplified)
         samples_pcm = struct.unpack(f'<{len(pcm_data)//2}h', pcm_data)
         ulaw_bytes = []
@@ -1067,6 +1109,14 @@ If the caller asks for a specialist or has complex requirements, offer to transf
 
     def convert_ulaw_to_pcm(self, ulaw_data: bytes) -> bytes:
         """Convert G.711 u-law to 16-bit PCM (same sample rate)"""
+        try:
+            import audioop
+            return audioop.ulaw2lin(ulaw_data, 2)
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.debug(f"audioop u-law to PCM conversion failed, using fallback: {e}")
+
         # G.711 u-law decoding table (simplified)
         pcm_samples = []
         
