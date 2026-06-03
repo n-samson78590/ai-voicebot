@@ -98,6 +98,16 @@ POST /api/webhooks/exotel/status
 
 This currently acknowledges callbacks and gives you the extension point for CRM sync, call timelines, and analytics persistence.
 
+### Exotel IVR Call
+```http
+GET /api/ivr/log?level=info&digit=info
+```
+
+This endpoint logs IVR interactions. The level parameter sets the level number for a multilevel IVR and the digit parameter logs the digit pressed by the user. Logs are stored in ../call_to_flow/backend/logs/. 
+
+Note that in order to enable logging the flow inside Exotel has to always be configured as follows:
+IVR Applet -> Passthru Applet (Configure URL as http://wss_url/api/ivr/log?level=info&digit=info)
+
 ## Notes
 
 - The voicebot applet URL still has to be changed manually when ngrok changes.

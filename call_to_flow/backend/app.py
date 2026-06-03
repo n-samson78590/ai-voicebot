@@ -8,12 +8,12 @@ from models import CallRequest, CallResponse, VoicebotStatus
 from services.exotel_service import ExotelConfigError, exotel_service
 from services.voicebot_service import voicebot_service
 import logging
+from datetime import datetime
+from pathlib import Path
+from datetime import datetime
 
-logging.basicConfig(
-    filename="ivr.log",
-    level=logging.INFO,
-    format="%(asctime)s | %(message)s"
-)
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(
     title="Exotel Call Flow Console",
@@ -97,12 +97,27 @@ def start_ivr_call(call_request: CallRequest) -> CallResponse:
 @app.get("/api/ivr/log")
 async def log_digit(request: Request):
 
-    digit = request.query_params.get("digit")
     call_sid = request.query_params.get("CallSid")
+    digit = request.query_params.get("digit")
+    level = request.query_params.get("level")
 
-    logging.info(
-        f"CallSid={call_sid} | Digit={digit}"
-    )
+    if not call_sid:
+        return PlainTextResponse(
+            "Missing CallSid",
+            status_code=400
+        )
+
+    log_file = LOG_DIR / f"{call_sid}.log"
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(
+            f"{call_sid} | "
+            f"{timestamp} | "
+            f"Level={level} | "
+            f"Digit={digit}\n"
+        )
 
     return PlainTextResponse("OK")
 
@@ -112,13 +127,3 @@ async def exotel_status_webhook(request: Request) -> dict:
     form = await request.form()
     # Placeholder for CRM sync, call timeline persistence, and analytics.
     return {"received": True, "fields": dict(form)}
-
-# @app.get("/debug/routes")
-# async def debug_routes():
-#     return [
-#         {
-#             "path": route.path,
-#             "name": route.name
-#         }
-#         for route in app.routes
-#     ]
