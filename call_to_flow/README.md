@@ -22,15 +22,16 @@ Streamlit UI
 
 The Streamlit page stays thin. For voicebot calls, the backend first starts the local `main.py --health-bot` process if needed, then connects to the voicebot app flow. For IVR calls, it directly connects to the IVR app flow.
 
-## Voicebot POC Caveat
+## POC Caveat
 
-The Exotel Voicebot Applet still needs a public WebSocket URL configured in the Exotel dashboard. For a local setup, that usually means:
+The Exotel Voicebot and Passthru applets still need a public WebSocket URL configured in the Exotel dashboard. For a local setup, that usually means:
 
 1. Start ngrok for the local voicebot WebSocket server.
-2. Copy the public `wss://.../ws` URL. Update URL with stream rate parameter.
-3. Manually update the Exotel Voicebot Applet configuration inside Exotel dashboard.
-4. Save and publish the flow.
-5. Use the Streamlit console to start the service and place calls.
+2. Copy the public `wss://.../ws` URL.
+3. Update URL with stream rate parameter for voicebot. Update URL with logging level/digit entered parameters for IVR.
+4. Manually update the Exotel Voicebot Applet and the Passthru applet configuration inside Exotel dashboard.
+5. Save and publish the flow.
+6. Use the Streamlit console to start the service and place calls.
 
 This app **does not automate** the Exotel dashboard update step
 
@@ -78,7 +79,7 @@ cd .\call_to_flow\
 streamlit run streamlit_app.py
 ```
 
-Optional: if the backend is not on `http://localhost:8000`, set `CALL_TO_FLOW_API_BASE` before launching Streamlit.
+Optional: if the backend is not on `http://localhost:5000`, set `CALL_TO_FLOW_API_BASE` before launching Streamlit.
 
 ## API
 
@@ -111,4 +112,5 @@ IVR Applet -> Passthru Applet (Configure URL as http://wss_url/api/ivr/log?level
 ## Notes
 
 - The voicebot applet URL still has to be changed manually when ngrok changes.
+- The passthru applet URL also has to be changed manually when ngrok URL changes
 - If the voicebot is already running outside this backend, the backend can still detect readiness through the configured port or health URL.
