@@ -138,3 +138,6 @@ ngrok-*
 
 # Bot launcher templates (generate using bot_launcher.py)
 bot_templates/
+
+# SQLite database files
+*.db
