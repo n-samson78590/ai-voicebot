@@ -34,12 +34,12 @@ if "search_ticket_id" not in st.session_state:
 left_col, right_col = st.columns([1.4, 1], gap="large")
 
 with left_col:
-	st.subheader("1) Trigger Dynamic IVR Call")
+	st.subheader("Trigger Dynamic IVR Call")
 	with st.form("trigger_call_form"):
-		phone_number = st.text_input("Phone Number", placeholder="+919876543210")
-		doctor_name = st.text_input("Doctor Name", placeholder="Dr. Sharma")
-		event_name = st.text_input("Event", placeholder="Annual Medical Conference")
-		location = st.text_input("Location", placeholder="Mumbai")
+		phone_number = st.text_input("Phone Number", placeholder="Enter phone number with country code, e.g. +919876543210")
+		doctor_name = st.text_input("Doctor Name", placeholder="Enter the name of the doctor")
+		event_name = st.text_input("Event", placeholder="Enter event name")
+		location = st.text_input("Location", placeholder="Enter specific location details")
 		initiated_by = st.text_input("Initiated By (optional)", placeholder="ops_user")
 
 		date_col, time_col = st.columns(2)
@@ -89,7 +89,7 @@ with left_col:
 			st.error(f"Call trigger failed: {exc}")
 
 with right_col:
-	st.subheader("2) Fetch SQLite Logs")
+	st.subheader("Fetch Call Details")
 	st.text_input(
 		"Search by Ticket ID",
 		key="search_ticket_id",

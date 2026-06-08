@@ -94,8 +94,8 @@ class CallStatusType(str, enum.Enum):
 
 
 class ResponseType(str, enum.Enum):
-    accept = "accept"
-    reject = "reject"
+    accept = "Invitation Accepted"
+    reject = "Invitation Rejected"
 
 
 class CallAttempt(Base):
@@ -398,24 +398,46 @@ async def ivr_response_head() -> PlainTextResponse:
 @app.get("/log", response_class=PlainTextResponse)
 async def log_call(
     request: Request,
-    CallSid: str | None = None,
-    CustomField: str | None = None,
-    Status: str | None = None,
-    Digits: str | None = None,
-    digit: str | None = None,
     db: Session = Depends(get_db),
 ) -> PlainTextResponse:
-    del request
-    pressed_digit = Digits or digit
+    params = dict(request.query_params)
+
+    print(f"RAW PASSTHRU PARAMS: {params}")
+
+    call_sid = params.get("CallSid")
+    custom_field = params.get("CustomField")
+
+    status = (
+        params.get("Status")
+        or params.get("DialCallStatus")
+    )
+
+    digit = (
+        params.get("digits")
+        or params.get("Digits")
+        or params.get("digit")
+    )
+
+    print(
+        f"Parsed values -> "
+        f"CallSid={call_sid}, "
+        f"CustomField={custom_field}, "
+        f"Status={status}, "
+        f"Digit={digit}"
+    )
+
     _persist_callback_to_response_table(
         db=db,
-        ticket_id=CustomField,
-        call_sid=CallSid,
-        digit=pressed_digit,
-        status=Status,
+        ticket_id=custom_field,
+        call_sid=call_sid,
+        digit=digit,
+        status=status,
     )
-    return PlainTextResponse(content="", headers={"Content-Type": "text/plain"})
 
+    return PlainTextResponse(
+        content="",
+        headers={"Content-Type": "text/plain"},
+    )
 
 @app.post("/log")
 async def log_call_post(request: Request, db: Session = Depends(get_db)) -> FastAPIResponse:
@@ -425,7 +447,7 @@ async def log_call_post(request: Request, db: Session = Depends(get_db)) -> Fast
     call_sid = payload.get("CallSid")
     custom_field = payload.get("CustomField")
     status = payload.get("Status")
-    digit = payload.get("Digits")
+    digit = payload.get("Digits") or payload.get("digits")
 
     _persist_callback_to_response_table(
         db=db,
@@ -450,7 +472,7 @@ async def call_status(request: Request, db: Session = Depends(get_db)) -> dict[s
 
     ticket_id = payload.get("CustomField")
     call_sid = payload.get("CallSid")
-    digit = payload.get("Digits")
+    digit = payload.get("Digits") or payload.get("digits")
     status = payload.get("Status")
 
     _persist_callback_to_response_table(
